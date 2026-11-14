@@ -17,6 +17,8 @@ Symulatory WebXR do testowania na Meta Quest 3 / 3S. Wszystko działa w przeglą
 
 ## Sterowanie (Kula Energii, kontrolery)
 
+**Paski:** życie, stamina (zużywają ją ciosy, kule i lot; odnawia się po chwili spokoju), KI (ładuje je tylko aura).
+
 **Poza walką**
 
 | Przycisk / ruch | Efekt |
@@ -24,26 +26,29 @@ Symulatory WebXR do testowania na Meta Quest 3 / 3S. Wszystko działa w przeglą
 | Chwyt jednej ręki (trzymaj), puść | kula z tej dłoni |
 | Chwyt obu, dłonie blisko siebie, puść | fala energii |
 | Chwyt obu, ręce nad głową, puść | wielka kula |
-| Chwyt obu, ręce w dół | ładowanie aury (KI) |
+| Chwyt obu, ręce w dół | aura: ładuje KI (dużo szybciej przy małym życiu) i odnawia staminę |
+| Y (krótko) | przy pełnym KI — wyższy poziom: mocniejsze ciosy, szybciej spada stamina |
+| Y (przytrzymaj) | niższy poziom |
 | Oba spusty | lot w kierunku, w który celujesz |
-| Prawa gałka w bok / B lub Y | obrót o 30° / powrót na start |
+| Prawa gałka w bok / B | obrót o 30° / powrót na start |
 
-**Walka wręcz** — włącza się sama, gdy jesteś blisko rywala
+**Walka wręcz** — włącza się sama, gdy jesteś blisko rywala. Tylko ręce i nogi, bez kul.
 
 | Przycisk | Efekt |
 |---|---|
-| Spust (trzymaj, puść) | pięść — dłużej = mocniej; ręka niżej niż jego klatka wybija go w górę, wyżej — w dół |
-| Chwyt (trzymaj, puść) | kopnięcie tą nogą |
+| Spust (trzymaj, puść) | pięść; mocno naładowana = zamaszysty cios z doskokiem |
+| Chwyt (trzymaj, puść) | kopnięcie; mocno naładowane = okrężne |
+| Gdzie trzymasz rękę | nad rywalem = cios z góry, pod nim = podbródkowy, z boku = sierpowy |
 | X / A (trzymaj) | blok — ręka tam, skąd leci cios (czerwony znacznik); odbija też jego pociski |
 | Oba spusty z rękami w górze, puść ruchem w dół | młot — wbija go w ziemię |
 
-Mocny cios wyrzuca rywala z walki — leci, wbija się w ściany kanionu albo robi krater. Trafienia ładują KI; pełny pasek = kolejna forma mocy (3 formy, każda silniejsza i szybsza).
+Ciosy są animowane: kolejny wychodzi dopiero po skończeniu poprzedniego (jedno wciśnięcie zostaje zapamiętane). Przy trafieniu gra na chwilę zamiera, a rywal reaguje zależnie od kierunku ciosu. Mocny cios wyrzuca go z walki — leci, wbija się w ściany i słupy albo robi krater.
 
 Na samych dłoniach (bez kontrolerów): pięść = chwyt, szczypnięcie = spust.
 
 ## Podgląd na komputerze
 
-Lewa ręka: `Q` spust, `A` chwyt, `Z` blok. Prawa: `E`, `D`, `C`. Pozy rąk: `1` razem, `2` w górę, `3` w dół. `Spacja` = fala, `R` = powrót, mysz = rozglądanie.
+Lewa ręka: `Q` spust, `A` chwyt, `Z` blok. Prawa: `E`, `D`, `C`. Pozy rąk: `1` razem, `2` w górę, `3` w dół. `Spacja` = fala, `T` = poziom (przytrzymaj = niżej), `R` = powrót, mysz = rozglądanie.
 
 ## Strojenie gestu
 

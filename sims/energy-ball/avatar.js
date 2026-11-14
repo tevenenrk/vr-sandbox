@@ -115,10 +115,24 @@ export class Avatar {
         foot.copy(H).addScaledVector(UP, -0.85).addScaledVector(fwd, 0.06).addScaledVector(_right, 0.04 * sgn);
       }
       if (k && k.t >= 0) {
-        // kopnięcie: szybko do celu, chwila w górze, powrót
-        const t = k.t;
-        const e = t < 0.35 ? Math.sin((t / 0.35) * Math.PI / 2) : Math.max(0, 1 - (t - 0.35) / 0.45);
-        foot.lerp(k.target, e);
+        // kopnięcie: podciągnięcie kolana (okrężne — z boku), wyprost do celu, chwila, powrót
+        const p = k.t / k.dur, h = k.hit / k.dur, hold = h + 0.12;
+        const round = k.style === 'round';
+        _b.copy(H).addScaledVector(UP, round ? 0.3 : 0.2);
+        if (round) _b.addScaledVector(_right, 0.5 * sgn).addScaledVector(fwd, 0.05);
+        else _b.addScaledVector(fwd, 0.35);
+        const ease = (x) => 1 - Math.pow(1 - Math.min(1, Math.max(0, x)), 3);
+        if (p < h * 0.55) foot.lerp(_b, ease(p / (h * 0.55)));
+        else if (p < h) {
+          const e = ease((p - h * 0.55) / (h * 0.45));
+          if (round) {
+            // łuk: z boku do celu przez punkt wysunięty do przodu
+            _c.copy(_b).lerp(k.target, 0.5).addScaledVector(fwd, 0.35);
+            foot.copy(_b).multiplyScalar((1 - e) * (1 - e)).addScaledVector(_c, 2 * (1 - e) * e).addScaledVector(k.target, e * e);
+          }
+          else foot.copy(_b).lerp(k.target, e);
+        } else if (p < hold) foot.copy(k.target);
+        else foot.lerp(k.target, Math.max(0, 1 - (p - hold) / (1 - hold)));
       }
       _pole.copy(fwd).addScaledVector(UP, 0.2);
       const K = solveIK(H, foot, LEG_L1, LEG_L2, _pole, _c);

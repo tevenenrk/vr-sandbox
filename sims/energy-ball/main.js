@@ -6,16 +6,19 @@
 //   • chwyt obu + ręce w górę → wielka kula nad głową, puść → rzut
 //   • chwyt obu + ręce w dół → ładowanie aury
 //   • oba spusty → lot w kierunku, w który celujesz
-// W walce wręcz (włącza się sama, gdy jesteś blisko rywala):
+// W walce wręcz (włącza się sama, gdy jesteś blisko rywala) — tylko ręce i nogi:
 //   • spust → pięść, chwyt → kopnięcie (im dłużej trzymasz, tym mocniej; cios wychodzi po puszczeniu)
+//   • ciosy są animowane i nie da się ich zadawać szybciej niż trwa animacja
 //   • X / A → blok ręką (trzymaj ją tam, skąd leci cios)
 //   • oba spusty z rękami w górze, puść ruchem w dół → młot
+// Paski: życie, stamina (zużywają ją ataki i lot), KI (ładuje je tylko aura — szybciej przy małym życiu).
+// Pełne KI → Y = wyższy poziom (mocniejsze ciosy, szybciej spada stamina). Przytrzymaj Y → niższy poziom.
 
 import * as THREE from 'three';
 import { XRHandModelFactory } from 'three/addons/webxr/XRHandModelFactory.js';
 import { renderer, scene, rig, camera, state, UP, clamp, rand, makeCanvasTex, glowTex } from './core.js';
 import { sfx, HUM_KAME, HUM_SMALL, HUM_GIANT, HUM_AURA } from './audio.js';
-import { EnergyBall, Beam, KAME_STYLE, SMALL_STYLE, GIANT_STYLE, RED_STYLE, Aura, boom, hitSpark, fadeBall, updateFx } from './fx.js';
+import { EnergyBall, Beam, KAME_STYLE, SMALL_STYLE, GIANT_STYLE, RED_STYLE, Aura, Trail, boom, hitSpark, fadeBall, updateFx } from './fx.js';
 import { heightAt, findSurface, impact, pillarHit, wallDecal, spawnDebris, updateWorld, setWorldMode, debrisGeo, debrisMat, isOpen, ARENA_RADIUS } from './world.js';
 import { Avatar } from './avatar.js';
 import { Enemy } from './enemy.js';
@@ -38,9 +41,21 @@ const CFG = {
   aim: THREE.MathUtils.degToRad(12),
   aimEnemy: THREE.MathUtils.degToRad(18),
   flySpeeds: [7, 10, 13, 16],
-  formMul: [1, 1.3, 1.6, 2],
+  dmgMul: [1, 1.5, 2.1, 2.8],       // siła ciosów na poziomach
+  staMul: [1, 1.25, 1.5, 1.75],     // koszt staminy na poziomach (rośnie wolniej niż siła — opłaca się)
+  upkeep: [0, 0.6, 1.2, 1.8],       // stały spadek staminy na poziomie (na sekundę)
   sizeMul: [1, 1.15, 1.3, 1.5],
   formBase: [0, 0.55, 0.8, 1],
+  staRegen: 14,                      // odnawianie staminy (na sekundę) po chwili bez ataku
+  kiRate: 0.11,                      // ładowanie KI aurą (na sekundę) przy pełnym życiu
+};
+// ciosy: czas trwania animacji, moment trafienia, koszt staminy, obrażenia, doskok kamery, "zamrożenie" przy trafieniu
+const STYLE = {
+  jab: { dur: 0.36, hit: 0.14, cost: 6, dmg: 4, wind: 0.07, lunge: 0.12, stop: 0.05 },
+  power: { dur: 0.64, hit: 0.32, cost: 13, dmg: 11, wind: 0.2, lunge: 0.3, stop: 0.12 },
+  kick: { dur: 0.52, hit: 0.22, cost: 8, dmg: 6, lunge: 0.15, stop: 0.06 },
+  round: { dur: 0.8, hit: 0.4, cost: 15, dmg: 13, lunge: 0.25, stop: 0.13 },
+  hammer: { dur: 0.9, hit: 0.46, cost: 22, dmg: 16, wind: 0.1, lunge: 0.2, stop: 0.16 },
 };
 
 const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vector3(), _n = new THREE.Vector3();
@@ -79,8 +94,8 @@ function makeInput(i) {
     selecting: false, blocking: false,
     ball: null, ballC: 0, ballHum: null,
     punchC: -1, kickC: -1,
-    strike: { t: -1, target: new THREE.Vector3(), hit: true, kind: '', c: 0, hitAt: 0.07 },
-    kick: { t: -1, target: new THREE.Vector3() },
+    kick: { t: -1, dur: 0.5, hit: 0.2, target: new THREE.Vector3(), style: 'front' },
+    yT: -1, yDone: false,
     turnLatch: false, deskLocal: new THREE.Vector3(i === 0 ? -0.2 : 0.2, -0.3, -0.42),
   };
   controller.addEventListener('connected', (e) => {
@@ -127,7 +142,7 @@ function readXRInput(st) {
     st.trig = !!(b[0] && b[0].pressed);
     st.grp = !!(b[1] && b[1].pressed);
     st.blk = !!(b[4] && b[4].pressed);   // X (lewy) / A (prawy)
-    st.back = !!(b[5] && b[5].pressed);  // Y (lewy) / B (prawy)
+    st.back = !!(b[5] && b[5].pressed);  // Y (lewy) = poziom, B (prawy) = powrót
     st.valid = true;
   }
 }
@@ -154,7 +169,7 @@ function readDeskInput(st, dt) {
   st.trig = !!keys[left ? 'KeyQ' : 'KeyE'];
   st.grp = !!(keys[left ? 'KeyA' : 'KeyD'] || keys.Space);
   st.blk = !!keys[left ? 'KeyZ' : 'KeyC'];
-  st.back = false;
+  st.back = left ? !!keys.KeyT : false;
 }
 
 function trackVelocity(st, now) {
@@ -201,20 +216,48 @@ function computeHands() {
 // ---------------------------------------------------------------------------
 // Gracz: życie, ki, formy, komunikaty
 // ---------------------------------------------------------------------------
-const P = { hp: 100, maxHp: 100, ki: 0, form: 0, inMelee: false, flash: 0, flashColor: new THREE.Color(1, 0, 0), msg: '', msgT: 0 };
+const P = {
+  hp: 100, maxHp: 100, sta: 100, maxSta: 100, exhausted: false, lastAct: 9, ki: 0, form: 0, inMelee: false,
+  flash: 0, flashColor: new THREE.Color(1, 0, 0), msg: '', msgT: 0, hitStop: 0, slowmo: 0,
+};
 const stats = { hits: 0, shots: 0, kos: 0, craters: 0 };
 function msg(text, time = 1.6) { P.msg = text; P.msgT = time; }
-const formMul = () => CFG.formMul[P.form];
+const dmgMul = () => CFG.dmgMul[P.form];
+const staMul = () => CFG.staMul[P.form];
 const sizeMul = () => CFG.sizeMul[P.form];
+// zużycie staminy; zwraca false, gdy brakuje sił
+function spend(cost) {
+  cost *= staMul();
+  P.lastAct = 0;
+  if (P.exhausted || P.sta < cost * 0.5) { P.sta = Math.max(0, P.sta - cost * 0.5); msg('Brak staminy!', 0.9); return false; }
+  P.sta = Math.max(0, P.sta - cost);
+  return true;
+}
 
 const aura = new Aura(debrisGeo, debrisMat);
 const avatar = new Avatar();
 const FLY = { speed: 0, dir: new THREE.Vector3(0, 0, -1), want: false };
 
 function addKi(x) {
-  if (P.form >= 3) { P.ki = Math.min(1, P.ki + x); return; }
-  P.ki += x;
-  if (P.ki >= 1) { P.ki = 0; transform(P.form + 1); }
+  const was = P.ki;
+  P.ki = Math.min(1, P.ki + x);
+  if (was < 1 && P.ki >= 1) {
+    sfx.ding();
+    msg(P.form < 3 ? `KI pełne! Y → poziom ${P.form + 1}` : 'KI pełne (najwyższy poziom)', 3);
+  }
+}
+function levelUp() {
+  if (P.form >= 3) { msg('To już najwyższy poziom', 1.2); return; }
+  if (P.ki < 1) { msg('Naładuj KI aurą: ręce w dół + oba chwyty', 2); return; }
+  P.ki = 0;
+  transform(P.form + 1);
+}
+function levelDown() {
+  if (P.form <= 0) return;
+  P.form--;
+  aura.form = P.form;
+  sfx.fizzle();
+  msg(`Poziom ${P.form}`, 1.5);
 }
 function transform(n) {
   P.form = n;
@@ -227,7 +270,7 @@ function transform(n) {
   sfx.transform(n);
   P.flash = 0.8; P.flashColor.setHex(0xffd060);
   pulseAll(1, 500);
-  msg(`FORMA ${n}!  Siła ×${CFG.formMul[n]}`, 2.5);
+  msg(`POZIOM ${n}!  Siła ×${CFG.dmgMul[n]}`, 2.5);
   if (enemy.hittable && (enemy.state === 'melee' || enemy.chestW.distanceTo(F.head) < 4)) {
     _v1.subVectors(enemy.chestW, F.head).setY(0).normalize().multiplyScalar(22).addScaledVector(UP, 6);
     enemy.launch(_v1.clone(), ctx);
@@ -259,6 +302,7 @@ const enemy = new Enemy();
 const eShots = [];
 const ctx = {
   head: F.head,
+  anchor: new THREE.Vector3(),   // głowa bez doskoku kamery (rywal trzyma dystans od tego punktu)
   bodyFwd: avatar.bodyFwd,
   right: new THREE.Vector3(),
   checkBlock(point) {
@@ -268,7 +312,8 @@ const ctx = {
   onBlocked(point) {
     sfx.block(point);
     hitSpark(point, 0.4, 0xfff0c0);
-    addKi(0.04);
+    P.sta = Math.max(0, P.sta - 4 * staMul());
+    P.hitStop = 0.05;
     pulseAll(0.5, 60);
     msg('Blok!', 0.8);
   },
@@ -283,14 +328,15 @@ const ctx = {
   meleeStart() {
     P.inMelee = true;
     FLY.speed = 0;
-    if (K.mode === 'single' || K.mode === 'giant' || K.mode === 'aura') { cancelKi(); K.mode = 'wait'; }
+    if (K.mode !== 'none' && K.mode !== 'wait') { cancelKi(); K.mode = 'wait'; }
     msg('WALKA WRĘCZ!', 1.5);
     sfx.warn();
   },
   meleeEnd() { P.inMelee = false; },
   announce(text) { if (P.msgT <= 0.3) msg(text, 0.7); },
+  onSlam(point, speed) { pulseAll(Math.min(1, speed / 30), 150); },
 };
-enemy.onKO = () => { stats.kos++; P.inMelee = false; addKi(0.3); msg('NOKAUT!', 2.5); };
+enemy.onKO = () => { stats.kos++; P.inMelee = false; P.slowmo = 1.2; msg('NOKAUT!', 2.5); };
 
 // ---------------------------------------------------------------------------
 // Ataki energią
@@ -337,7 +383,7 @@ function mergeSingles() {
 
 // --- kula z jednej dłoni ---
 function updateSingle(st, dt) {
-  if (st.grp && st.valid) {
+  if (st.grp && st.valid && (st.ball || !P.exhausted)) {
     if (!st.ball) {
       st.ball = new EnergyBall(SMALL_STYLE);
       st.ball.radius = 0.01;
@@ -355,7 +401,7 @@ function updateSingle(st, dt) {
     const b = st.ball, c = st.ballC;
     st.ball = null;
     st.ballHum = stopHum(st.ballHum);
-    if (c < 0.1) { fizzleBall(b); return; }
+    if (c < 0.1 || !spend(6 + 6 * c)) { fizzleBall(b); return; }
     b.gathering = false;
     const dir = aimAssist(st.aim.clone(), b.group.position);
     projectiles.push({ kind: 'small', ball: b, vel: dir.multiplyScalar(20 + c * 6), charge: c, age: 0, origin: b.group.position.clone(), prev: new THREE.Vector3() });
@@ -400,7 +446,7 @@ function fireKame() {
   K.kame = null;
   K.hum = stopHum(K.hum);
   if (!b) return;
-  if (c < CFG.minKame) { fizzleBall(b); return; }
+  if (c < CFG.minKame || !spend(14 + 22 * c)) { fizzleBall(b); return; }
   const L = side('left'), R = side('right');
   const dir = _v1.addVectors(L.aim, R.aim);
   if (dir.lengthSq() < 0.1) dir.copy(F.fwd);
@@ -445,7 +491,7 @@ function throwGiant() {
   K.giant = null;
   K.giantHum = stopHum(K.giantHum);
   if (!b) return;
-  if (b.radius < CFG.giantMin) { fizzleBall(b); return; }
+  if (b.radius < CFG.giantMin || !spend(35)) { fizzleBall(b); return; }
   b.gathering = false;
   const dir = F.fwd.clone();
   if (dir.y > 0.2) dir.y = 0.2;
@@ -462,17 +508,25 @@ function powering(dt) {
   aura.powering = true;
   if (!K.auraHum) K.auraHum = sfx.hum(HUM_AURA);
   if (K.auraHum) K.auraHum.update(aura.level);
-  addKi(dt * 0.1);
+  // im mniej życia, tym szybciej rośnie KI
+  addKi(dt * CFG.kiRate * (1 + 3 * (1 - P.hp / P.maxHp)));
   if (Math.random() < dt * 6) pulseAll(0.2 + aura.level * 0.4, 50);
 }
 
 function updateKi(dt) {
   const L = side('left'), R = side('right');
+  // w walce wręcz tylko ręce i nogi — żadnych kul
+  if (P.inMelee) {
+    if (K.mode !== 'none' && K.mode !== 'wait') { cancelKi(); K.mode = 'wait'; }
+    if (K.mode === 'wait' && !L.grp && !R.grp) K.mode = 'none';
+    return;
+  }
   const both = L.valid && R.valid && L.grp && R.grp;
   if ((K.mode === 'none' || K.mode === 'single') && both) {
-    if (F.up && !P.inMelee) { mergeSingles(); startGiant(); K.mode = 'giant'; }
+    if (F.downApart) { mergeSingles(); K.mode = 'aura'; }
+    else if (P.exhausted) { /* bez sił — tylko aura */ }
+    else if (F.up) { mergeSingles(); startGiant(); K.mode = 'giant'; }
     else if (F.d < CFG.closeDist) { startKame(mergeSingles()); K.mode = 'kame'; }
-    else if (F.downApart && !P.inMelee) { mergeSingles(); K.mode = 'aura'; }
   }
   switch (K.mode) {
     case 'none':
@@ -499,59 +553,144 @@ function updateKi(dt) {
 // Walka wręcz: pięści, kopnięcia, młot, blok
 // ---------------------------------------------------------------------------
 const HAM = { armed: false, armY: 0, done: false };
+// aktualny cios gracza (animacja blokuje kolejne do końca) + jeden zapamiętany następny
+const SK = { cur: null, queue: null, camOff: new THREE.Vector3(), camGoal: new THREE.Vector3() };
+const trails = { left: new Trail(0xffe7a0), right: new Trail(0xffe7a0), footL: new Trail(0xffd27a), footR: new Trail(0xffd27a) };
+const ease = (x) => 1 - Math.pow(1 - clamp(x, 0, 1), 3);
+const easeIn = (x) => { x = clamp(x, 0, 1); return x * x; };
+const REACT_BY_ZONE = { over: 'crush', upper: 'uppercut', hookL: 'hookL', hookR: 'hookR', straight: 'head_back', fold: 'fold' };
+const ZONE_TEXT = { over: 'z góry', upper: 'podbródkowy', hookL: 'sierpowy', hookR: 'sierpowy', straight: 'prosty', fold: 'kopnięcie' };
 
-function doStrike(kind, st, c) {
-  const E = enemy.chestW;
-  const reach = kind === 'kick' ? CFG.reach + 0.3 : CFG.reach + (kind === 'hammer' ? 0.4 : 0);
-  const inReach = enemy.hittable && E.distanceTo(F.head) < reach;
-  const S = st.strike;
-  S.kind = kind; S.c = c; S.t = 0; S.hit = !inReach; S.hitAt = kind === 'kick' ? 0.13 : 0.07;
-  if (inReach) S.target.copy(E);
-  else S.target.copy(st.pos).addScaledVector(st.aim, 0.5);
-  if (kind === 'kick') {
-    st.kick.t = 0;
-    if (inReach) st.kick.target.copy(E).addScaledVector(UP, -0.15);
-    else st.kick.target.copy(avatar.hips).addScaledVector(avatar.bodyFwd, 0.85).addScaledVector(UP, 0.25);
+function startStrike(kind, st, c) {
+  if (SK.cur) { SK.queue = { kind, st, c }; return; }
+  let style = kind === 'punch' ? (c >= 0.7 ? 'power' : 'jab') : kind === 'kick' ? (c >= 0.65 ? 'round' : 'kick') : 'hammer';
+  if (!spend(STYLE[style].cost * (1 + c * 0.5))) {
+    c = Math.min(c, 0.25);
+    if (style === 'power') style = 'jab';
+    if (style === 'round') style = 'kick';
   }
-  sfx.whoosh(c);
+  const S = STYLE[style];
+  const E = enemy.chestW, Hd = enemy.headW;
+  const reach = CFG.reach + (kind === 'kick' ? 0.3 : 0) + (kind === 'hammer' ? 0.4 : 0);
+  const inReach = enemy.hittable && E.distanceTo(F.head) < reach;
+  const toPlayer = _v2.subVectors(F.head, E).setY(0).normalize().clone();
+
+  // strefa ciosu: skąd idzie ręka względem rywala
+  let zone;
+  if (kind === 'hammer') zone = 'over';
+  else if (kind === 'kick') zone = style === 'round' ? (st.handedness === 'left' ? 'hookL' : 'hookR') : 'fold';
+  else {
+    const lat = _v1.subVectors(st.pos, F.head).dot(F.right);
+    if (st.pos.y > Hd.y - 0.02) zone = 'over';
+    else if (st.pos.y < E.y - 0.1) zone = 'upper';
+    else if (Math.abs(lat) > 0.28) zone = lat < 0 ? 'hookL' : 'hookR';
+    else zone = 'straight';
+  }
+  // cel na ciele rywala
+  const target = new THREE.Vector3();
+  if (inReach) {
+    switch (zone) {
+      case 'over': target.copy(Hd).addScaledVector(UP, 0.1); break;
+      case 'upper': target.copy(Hd).addScaledVector(UP, -0.1).addScaledVector(toPlayer, 0.08); break;
+      case 'hookL': target.copy(Hd).addScaledVector(F.right, -0.12); if (kind === 'kick') target.addScaledVector(UP, -0.05); break;
+      case 'hookR': target.copy(Hd).addScaledVector(F.right, 0.12); if (kind === 'kick') target.addScaledVector(UP, -0.05); break;
+      case 'fold': target.copy(E).addScaledVector(UP, -0.18).addScaledVector(toPlayer, 0.12); break;
+      default: (style === 'jab' ? target.copy(Hd) : target.copy(E)).addScaledVector(toPlayer, 0.1);
+    }
+  } else if (kind === 'kick') target.copy(avatar.hips).addScaledVector(avatar.bodyFwd, 0.85).addScaledVector(UP, style === 'round' ? 0.6 : 0.25);
+  else target.copy(st.pos).addScaledVector(st.aim, 0.55);
+
+  // zamach i łuk ciosu
+  const start = st.pos.clone();
+  const wind = start.clone().addScaledVector(F.fwdFlat, -(S.wind || 0.05));
+  const ctrl = new THREE.Vector3();
+  switch (zone) {
+    case 'over': wind.addScaledVector(UP, style === 'jab' ? 0.15 : 0.32); break;
+    case 'upper': wind.addScaledVector(UP, -0.2); break;
+    case 'hookL': wind.addScaledVector(F.right, -0.25); break;
+    case 'hookR': wind.addScaledVector(F.right, 0.25); break;
+    default: if (style === 'power') wind.addScaledVector(F.right, st.handedness === 'left' ? -0.12 : 0.12).addScaledVector(UP, 0.05);
+  }
+  ctrl.copy(wind).lerp(target, 0.5);
+  if (zone === 'over') ctrl.addScaledVector(UP, 0.25);
+  if (zone === 'upper') ctrl.addScaledVector(UP, -0.15);
+  if (zone === 'hookL') ctrl.addScaledVector(F.right, -0.3);
+  if (zone === 'hookR') ctrl.addScaledVector(F.right, 0.3);
+
+  SK.cur = { kind, style, S, st, c, zone, t: 0, start, wind, ctrl, target, inReach, hit: false, side: st.handedness, both: kind === 'hammer' };
+  if (kind === 'kick') {
+    st.kick.t = 0; st.kick.dur = S.dur; st.kick.hit = S.hit; st.kick.style = style === 'round' ? 'round' : 'front';
+    st.kick.target.copy(target);
+  }
+  sfx.whoosh(style === 'jab' || style === 'kick' ? c * 0.6 : 0.9);
 }
-function resolveStrike(st) {
-  const S = st.strike;
-  if (!enemy.hittable) return;
-  const E = enemy.chestW;
-  if (E.distanceTo(F.head) > CFG.reach + 1) return;
-  const c = S.c, fm = formMul();
-  if (S.kind !== 'hammer' && enemy.blocksHit(c)) {
-    sfx.block(E); hitSpark(E, 0.3, 0xffd0a0); addKi(0.01); msg('Rywal zablokował', 0.8);
-    pulse(st, 0.3, 40);
+
+// pozycja pięści w danej chwili animacji
+function strikeFist(cur, out, live) {
+  const S = cur.S, t = cur.t, w = S.hit * 0.4;
+  if (t < w) return out.lerpVectors(cur.start, cur.wind, ease(t / w));
+  if (t < S.hit) {
+    const e = easeIn((t - w) / (S.hit - w));
+    return out.copy(cur.wind).multiplyScalar((1 - e) * (1 - e)).addScaledVector(cur.ctrl, 2 * (1 - e) * e).addScaledVector(cur.target, e * e);
+  }
+  const hold = S.hit + (cur.style === 'jab' ? 0.05 : 0.12);
+  if (t < hold) return out.copy(cur.target);
+  return out.lerpVectors(cur.target, live, ease((t - hold) / (S.dur - hold)));
+}
+// "kamera" ciosu: doskok do przodu, przy ciosie z góry wzniesienie i zejście
+function strikeCam(cur, out) {
+  const S = cur.S, t = cur.t, h = S.hit;
+  const f = S.lunge * (t < h ? ease(t / h) : Math.max(0, 1 - (t - h) / (S.dur - h))) * (cur.inReach ? 1 : 0.4);
+  let u = 0;
+  if (cur.zone === 'over') {
+    const big = cur.style === 'jab' ? 0.08 : 0.22;
+    if (t < h * 0.7) u = big * ease(t / (h * 0.7));
+    else if (t < h) u = big - (big + 0.1) * ((t - h * 0.7) / (h * 0.3));
+    else u = -0.1 * Math.max(0, 1 - (t - h) / (S.dur - h));
+  } else if (cur.zone === 'upper') {
+    u = t < h ? -0.07 * ease(t / h) : 0.16 * Math.sin(Math.PI * clamp((t - h) / (S.dur - h), 0, 1));
+  }
+  return out.copy(F.fwdFlat).multiplyScalar(f).addScaledVector(UP, u);
+}
+
+function resolveStrike(cur) {
+  if (!cur.inReach || !enemy.hittable || enemy.chestW.distanceTo(F.head) > CFG.reach + 1.2) { sfx.whoosh(0.2); return; }
+  const c = cur.c, dm = dmgMul();
+  const strong = cur.style === 'power' || cur.style === 'round' || cur.style === 'hammer';
+  const hitPos = (cur.zone === 'fold' || (cur.zone === 'straight' && cur.style !== 'jab')) ? enemy.chestW.clone() : enemy.headW.clone();
+  if (cur.style !== 'hammer' && enemy.blocksHit(c)) {
+    sfx.block(hitPos); hitSpark(hitPos, 0.3, 0xffd0a0); msg('Rywal zablokował', 0.8);
+    P.hitStop = 0.05;
+    pulse(cur.st, 0.3, 40);
     return;
   }
-  const dir = _v1.subVectors(E, F.head).setY(0).normalize().clone();
-  let dmg, launch = null;
+  const away = _v1.subVectors(enemy.chestW, F.head).setY(0).normalize().clone();
   const juggle = enemy.state !== 'melee';
-  if (S.kind === 'hammer') {
-    dmg = (10 + 15 * c) * fm;
-    launch = _v2.copy(dir).multiplyScalar(0.25).addScaledVector(UP, -1).normalize().multiplyScalar((30 + c * 25) * fm).clone();
-  } else if (S.kind === 'kick') {
-    dmg = (4 + 12 * c) * fm;
-    if (c >= 0.65 || (juggle && c >= 0.3)) launch = _v2.copy(dir).addScaledVector(UP, 0.4).normalize().multiplyScalar((18 + c * 32) * fm).clone();
-  } else {
-    dmg = (3 + 9 * c) * fm;
-    // ręka niżej niż klatka rywala → wybicie w górę, wyżej → w dół
-    const vert = clamp((E.y - st.pos.y) * 2.5, -0.85, 0.9);
-    if (c >= 0.7 || (juggle && c >= 0.3)) launch = _v2.copy(dir).addScaledVector(UP, vert).normalize().multiplyScalar((14 + c * 30) * fm).clone();
+  const dmg = cur.S.dmg * (0.6 + c * 0.8) * dm;
+  let launch = null;
+  if ((strong && (c >= 0.7 || cur.style === 'hammer')) || (juggle && c >= 0.3)) {
+    const d = new THREE.Vector3();
+    switch (cur.zone) {
+      case 'over': d.copy(away).multiplyScalar(0.3).addScaledVector(UP, -1); break;
+      case 'upper': d.copy(away).multiplyScalar(0.35).addScaledVector(UP, 1); break;
+      case 'hookL': d.copy(away).multiplyScalar(0.6).addScaledVector(F.right, 0.9).addScaledVector(UP, 0.15); break;
+      case 'hookR': d.copy(away).multiplyScalar(0.6).addScaledVector(F.right, -0.9).addScaledVector(UP, 0.15); break;
+      case 'fold': d.copy(away).addScaledVector(UP, 0.3); break;
+      default: d.copy(away).addScaledVector(UP, 0.12);
+    }
+    launch = d.normalize().multiplyScalar((16 + c * 26) * Math.sqrt(dm) * (cur.style === 'hammer' ? 1.3 : 1));
   }
-  const hitPos = E.clone();
-  enemy.hitMelee(dmg, dir, launch, ctx);
-  hitSpark(hitPos, 0.3 + c * 0.7, launch ? 0xffe080 : 0xffffff);
-  sfx.punch(c, hitPos);
-  pulse(st, 0.4 + c * 0.6, 60 + c * 140);
-  if (S.kind === 'hammer') pulseAll(1, 250);
-  addKi(0.03 + c * 0.07);
+  enemy.hitMelee(dmg, away, launch, ctx, REACT_BY_ZONE[cur.zone] || 'head_back', strong);
+  hitSpark(hitPos, strong ? 1 : 0.45, strong ? 0xffe080 : 0xffffff);
+  if (strong) boom(hitPos, 0.35 + c * 0.3, { light: true, color: 0xffb040, hot: 0xffffff, spark: 0xfff0c0, smoke: false });
+  sfx.punch(Math.min(1, c + (strong ? 0.3 : 0)), hitPos);
+  pulse(cur.st, 0.4 + c * 0.6, 60 + c * 140);
+  if (cur.style === 'hammer') pulseAll(1, 250);
+  P.hitStop = cur.S.stop * (launch ? 1.5 : 1);
   stats.hits++;
   if (launch) {
-    boom(hitPos, 0.4 + c * 0.4, { light: false, color: 0xffd070, spark: 0xfff0c0 });
-    msg(S.kind === 'hammer' ? 'MŁOT!' : 'Odleciał!', 1.2);
+    P.slowmo = 0.45;
+    msg(cur.style === 'hammer' ? 'MŁOT!' : `${ZONE_TEXT[cur.zone]} — odleciał!`, 1.2);
   }
 }
 
@@ -564,7 +703,7 @@ function updateCombat(dt) {
   FLY.want = bothTrig && !P.inMelee && !HAM.armed && state.xrMode !== 'ar';
 
   for (const st of [L, R]) {
-    // pięść: spust
+    // pięść: spust (ładowanie trwa także w czasie animacji poprzedniego ciosu)
     if (st.trig && !st.pTrig) st.punchC = 0;
     if (st.trig && st.punchC >= 0) st.punchC = Math.min(1, st.punchC + dt / CFG.punchTime);
     if (FLY.want) st.punchC = -1;
@@ -573,32 +712,40 @@ function updateCombat(dt) {
         if (!HAM.done) {
           HAM.done = true;
           const c = Math.max(L.punchC, R.punchC, 0);
-          if (F.mid.y < HAM.armY - 0.15 || F.vm.y < -0.6) {
-            doStrike('hammer', L, c);
-            R.strike.t = 0; R.strike.hit = true; R.strike.kind = 'hammer'; R.strike.target.copy(L.strike.target);
-          } else { doStrike('punch', L, c); doStrike('punch', R, c); }
+          if (F.mid.y < HAM.armY - 0.15 || F.vm.y < -0.6) startStrike('hammer', L, c);
+          else startStrike('punch', st, c);
           L.punchC = R.punchC = -1;
         }
-      } else if (st.punchC >= 0) doStrike('punch', st, st.punchC);
+      } else if (st.punchC >= 0) startStrike('punch', st, st.punchC);
       st.punchC = -1;
     }
     // kopnięcie: chwyt (tylko w walce wręcz)
     if (P.inMelee && K.mode === 'none') {
       if (st.grp && !st.pGrp) st.kickC = 0;
       if (st.grp && st.kickC >= 0) st.kickC = Math.min(1, st.kickC + dt / CFG.kickTime);
-      if (!st.grp && st.pGrp && st.kickC >= 0) { doStrike('kick', st, st.kickC); st.kickC = -1; }
+      if (!st.grp && st.pGrp && st.kickC >= 0) { startStrike('kick', st, st.kickC); st.kickC = -1; }
     } else st.kickC = -1;
     st.blocking = st.blk && st.valid;
-
-    const S = st.strike;
-    if (S.t >= 0) {
-      S.t += dt;
-      if (!S.hit && S.t >= S.hitAt) { S.hit = true; resolveStrike(st); }
-      if (S.t > 0.32) S.t = -1;
-    }
-    if (st.kick.t >= 0) { st.kick.t += dt * 1.6; if (st.kick.t > 0.8) st.kick.t = -1; }
+    if (st.kick.t >= 0) { st.kick.t += dt; if (st.kick.t > st.kick.dur) st.kick.t = -1; }
   }
   if (HAM.armed && !L.trig && !R.trig) HAM.armed = false;
+
+  // animacja bieżącego ciosu
+  const cur = SK.cur;
+  if (cur) {
+    cur.t += dt;
+    if (!cur.hit && cur.t >= cur.S.hit) { cur.hit = true; resolveStrike(cur); }
+    if (cur.t >= cur.S.dur) {
+      SK.cur = null;
+      if (SK.queue) { const q = SK.queue; SK.queue = null; startStrike(q.kind, q.st, q.c); }
+    }
+  }
+  // przesunięcie kamery za ciosem (dodawane do pozycji gracza i zdejmowane po ciosie)
+  if (SK.cur) strikeCam(SK.cur, SK.camGoal); else SK.camGoal.set(0, 0, 0);
+  _v1.copy(SK.camOff).lerp(SK.camGoal, 1 - Math.exp(-dt * 25));
+  rig.position.add(_v2.subVectors(_v1, SK.camOff));
+  SK.camOff.copy(_v1);
+  ctx.anchor.copy(F.head).sub(SK.camOff);
 }
 
 // ---------------------------------------------------------------------------
@@ -612,7 +759,7 @@ function moveRig(dt) {
     if (_v1.lengthSq() < 0.05) _v1.copy(F.fwd);
     FLY.dir.lerp(_v1.normalize(), 1 - Math.exp(-dt * 6)).normalize();
   }
-  const target = want ? CFG.flySpeeds[P.form] : 0;
+  const target = want ? (P.exhausted ? 4 : CFG.flySpeeds[P.form]) : 0;
   FLY.speed += (target - FLY.speed) * (1 - Math.exp(-dt * (want ? 2.5 : 4)));
   if (FLY.speed > 0.01) {
     const step = _v2.copy(FLY.dir).multiplyScalar(FLY.speed * dt);
@@ -648,19 +795,29 @@ function updateButtonsXR() {
         rig.rotateY(ang);
       } else if (Math.abs(x) < 0.3) st.turnLatch = false;
     }
-    if (st.back && !st.pBack) {
+    if (st.handedness === 'right' && st.back && !st.pBack) {
       if (enemy.state === 'melee') enemy.leaveMelee(ctx);
       resetRig();
       msg('Powrót na start', 1);
     }
   }
 }
+// Y (lewy kontroler, na komputerze T): krótko → wyższy poziom, przytrzymaj → niższy
+function updateLevelButton(dt) {
+  const st = side('left');
+  if (st.back && !st.pBack) { st.yT = 0; st.yDone = false; }
+  if (st.back && st.yT >= 0) {
+    st.yT += dt;
+    if (st.yT > 1.2 && !st.yDone) { st.yDone = true; levelDown(); }
+  }
+  if (!st.back && st.pBack && st.yT >= 0) { if (!st.yDone) levelUp(); st.yT = -1; }
+}
 
 // ---------------------------------------------------------------------------
 // Pociski
 // ---------------------------------------------------------------------------
 function ballDamage(p) {
-  const fm = formMul();
+  const fm = dmgMul();
   if (p.kind === 'giant') return (45 + p.ball.radius * 8) * fm;
   if (p.kind === 'kame') return (10 + 30 * p.charge) * fm;
   return (5 + 10 * p.charge) * fm;
@@ -677,16 +834,17 @@ function detonate(p, pos, surface) {
     else { impact(pos, crater, _n); floor = _n.y > 0.6; }
     stats.craters++;
   }
-  boom(pos, size, { ground: floor, color: p.ball.o === RED_STYLE ? 0xff3a3a : 0x3aa8ff });
+  const red = p.ball.o === RED_STYLE;
+  boom(pos, size, { ground: floor, color: red ? 0xff3a3a : 0x3aa8ff, hot: red ? 0xffd0c0 : 0xd8f4ff, spark: red ? 0xffb0b0 : 0xbff0ff });
+  if (size > 0.8) P.hitStop = Math.max(P.hitStop, Math.min(0.12, size * 0.03));
   sfx.explode(pos, size);
   pulseAll(Math.min(1, 0.2 + size * 0.15), 80 + size * 60);
   for (const t of targets) {
-    if (t.alive && t.group.position.distanceTo(pos) < blast + t.radius) { t.destroy(pos); stats.hits++; addKi(0.02); }
+    if (t.alive && t.group.position.distanceTo(pos) < blast + t.radius) { t.destroy(pos); stats.hits++; }
   }
   if (!p.hitEnemy && enemy.hittable && enemy.chestW.distanceTo(pos) < blast) {
     const dir = _v1.subVectors(enemy.chestW, pos).normalize().clone();
     enemy.hitByBall(ballDamage(p) * 0.6, dir, p.kind === 'giant', ctx);
-    addKi(0.03);
   }
   fadeBall(p.ball);
 }
@@ -708,7 +866,6 @@ function updateProjectiles(dt, t) {
       enemy.hitByBall(ballDamage(p), dir, strong, ctx);
       p.hitEnemy = true;
       stats.hits++;
-      addKi(p.kind === 'small' ? 0.03 : p.kind === 'kame' ? 0.08 : 0.15);
       msg(strong ? 'Potężne trafienie!' : 'Trafienie!', 1);
       detonate(p, pos, null);
       done = true;
@@ -763,7 +920,7 @@ function updateProjectiles(dt, t) {
     if (deskBlock || inputs.some(st => st.blocking && st.pos.distanceTo(pos) < 0.45)) {
       const dir = _v1.subVectors(enemy.chestW, pos).normalize().clone();
       projectiles.push({ kind: 'small', ball: s.ball, vel: dir.multiplyScalar(22), charge: 0.7, age: 0, origin: pos.clone(), prev: new THREE.Vector3() });
-      sfx.block(pos); hitSpark(pos, 0.4, 0xffd0d0); addKi(0.05); msg('Odbite!', 1);
+      sfx.block(pos); hitSpark(pos, 0.4, 0xffd0d0); msg('Odbite!', 1);
       eShots.splice(i, 1);
       continue;
     }
@@ -884,19 +1041,20 @@ const hud = (() => {
     g.fillStyle = '#10131c'; g.font = 'bold 24px system-ui, sans-serif'; g.fillText(label, 26, y + 26);
   }
   function draw() {
-    const key = `${Math.round(P.hp)}|${Math.round(P.ki * 100)}|${P.form}|${Math.round(enemy.hp)}|${P.inMelee}|${P.msgT > 0 ? P.msg : ''}`;
+    const key = `${Math.round(P.hp)}|${Math.round(P.sta)}|${P.exhausted}|${Math.round(P.ki * 100)}|${P.form}|${Math.round(enemy.hp)}|${P.inMelee}|${P.msgT > 0 ? P.msg : ''}`;
     if (key === last) return;
     last = key;
     g.clearRect(0, 0, 512, 256);
     g.fillStyle = 'rgba(10,12,24,0.78)';
     g.beginPath(); if (g.roundRect) g.roundRect(2, 2, 508, 252, 22); else g.rect(2, 2, 508, 252); g.fill();
-    bar(14, `ŻYCIE ${Math.round(P.hp)}`, P.hp / P.maxHp, '#58e07a');
-    bar(56, P.form >= 3 ? 'KI — MAKS' : `KI → forma ${P.form + 1}`, P.ki, '#ffd34d');
-    g.fillStyle = '#ffcf7a'; g.font = 'bold 30px system-ui, sans-serif';
-    g.fillText(`Forma ${P.form}   KO: ${stats.kos}`, 18, 130);
-    g.fillStyle = '#ff8a95'; g.font = '26px system-ui, sans-serif';
-    g.fillText(`Rywal: ${Math.max(0, Math.round(enemy.hp))}/${enemy.maxHp}${P.inMelee ? '   ⚔ WALKA' : ''}`, 18, 172);
-    if (P.msgT > 0) { g.fillStyle = '#ffffff'; g.font = 'bold 32px system-ui, sans-serif'; g.fillText(P.msg, 18, 228); }
+    bar(10, `ŻYCIE ${Math.round(P.hp)}`, P.hp / P.maxHp, '#58e07a');
+    bar(50, P.exhausted ? 'STAMINA — ZMĘCZONY' : `STAMINA ${Math.round(P.sta)}`, P.sta / P.maxSta, P.exhausted ? '#ff8a5c' : '#5cc8ff');
+    bar(90, P.ki >= 1 ? (P.form < 3 ? `KI PEŁNE → Y = poziom ${P.form + 1}` : 'KI PEŁNE') : `KI ${Math.round(P.ki * 100)}%`, P.ki, P.ki >= 1 ? '#fff07a' : '#ffd34d');
+    g.fillStyle = '#ffcf7a'; g.font = 'bold 28px system-ui, sans-serif';
+    g.fillText(`Poziom ${P.form}   KO: ${stats.kos}`, 18, 160);
+    g.fillStyle = '#ff8a95'; g.font = '24px system-ui, sans-serif';
+    g.fillText(`Rywal: ${Math.max(0, Math.round(enemy.hp))}/${enemy.maxHp}${P.inMelee ? '   ⚔ WALKA' : ''}`, 18, 194);
+    if (P.msgT > 0) { g.fillStyle = '#ffffff'; g.font = 'bold 28px system-ui, sans-serif'; g.fillText(P.msg, 18, 236); }
     tex.needsUpdate = true;
   }
   return { sprite, draw };
@@ -930,18 +1088,20 @@ function placeHud() {
     'Chwyt 1 ręki → kula w dłoni, puść → strzał',
     'Chwyt obu, dłonie razem → fala energii',
     'Chwyt obu, ręce w górę → wielka kula',
-    'Chwyt obu, ręce w dół → ładowanie aury',
     'Oba spusty → lot tam, gdzie celujesz',
   ]);
-  sec(430, 'Walka wręcz (gdy rywal jest blisko)', [
+  sec(390, 'Walka wręcz — tylko ręce i nogi', [
     'Spust → pięść,  chwyt → kopnięcie',
-    'Trzymaj dłużej = mocniej, cios po puszczeniu',
+    'Trzymaj dłużej = mocniejszy cios (inny ruch)',
+    'Ręka nad nim = z góry, pod nim = podbródkowy',
     'X / A → blok: ręka tam, skąd leci cios',
     'Oba spusty w górze, puść w dół → młot',
   ]);
-  sec(670, 'Inne', [
-    'Ciosy i trafienia ładują KI → kolejne formy',
-    'Prawa gałka → obrót,  B / Y → powrót na start',
+  sec(670, 'Aura, KI i poziomy', [
+    'Chwyt obu, ręce w dół → aura ładuje KI',
+    '(im mniej życia, tym szybciej)',
+    'Pełne KI → Y = wyższy poziom, trzymaj Y = niższy',
+    'B → powrót na start,  prawa gałka → obrót',
   ]);
   tex.needsUpdate = true;
 }
@@ -1009,7 +1169,7 @@ async function startSession(mode) {
 btnVR.addEventListener('click', () => startSession('vr'));
 btnAR.addEventListener('click', () => startSession('ar'));
 
-const DESK_HELP = 'Podgląd: lewa ręka <kbd>Q</kbd> spust, <kbd>A</kbd> chwyt, <kbd>Z</kbd> blok; prawa <kbd>E</kbd>, <kbd>D</kbd>, <kbd>C</kbd>. Pozy: <kbd>1</kbd> dłonie razem, <kbd>2</kbd> w górę, <kbd>3</kbd> w dół. <kbd>Spacja</kbd> fala, <kbd>R</kbd> powrót, mysz — rozglądanie.';
+const DESK_HELP = 'Podgląd: lewa ręka <kbd>Q</kbd> spust, <kbd>A</kbd> chwyt, <kbd>Z</kbd> blok; prawa <kbd>E</kbd>, <kbd>D</kbd>, <kbd>C</kbd>. Pozy: <kbd>1</kbd> dłonie razem, <kbd>2</kbd> w górę, <kbd>3</kbd> w dół. <kbd>Spacja</kbd> fala, <kbd>T</kbd> poziom (przytrzymaj = niżej), <kbd>R</kbd> powrót, mysz — rozglądanie.';
 (async () => {
   if (!('xr' in navigator)) { info.innerHTML = 'Ta przeglądarka nie obsługuje WebXR.<br>' + DESK_HELP; return; }
   const [vr, ar] = await Promise.all([
@@ -1057,13 +1217,20 @@ const handsForAvatar = {
 };
 const kickForAvatar = { left: null, right: null };
 
+let gameTime = 0;
 function frame() {
-  const dt = Math.min(clock.getDelta(), 0.05);
-  const t = clock.elapsedTime;
+  const realDt = Math.min(clock.getDelta(), 0.05);
+  // zamrożenie przy trafieniu i krótkie spowolnienie po mocnym ciosie
+  let scale = 1;
+  if (P.hitStop > 0) { P.hitStop -= realDt; scale = 0.06; }
+  else if (P.slowmo > 0) { P.slowmo -= realDt; scale = 0.35; }
+  const dt = realDt * scale;
+  gameTime += dt;
+  const t = gameTime;
   const xr = renderer.xr.isPresenting;
 
   computeHead();
-  for (const st of inputs) { if (xr) readXRInput(st); else readDeskInput(st, dt); trackVelocity(st, t); }
+  for (const st of inputs) { if (xr) readXRInput(st); else readDeskInput(st, realDt); trackVelocity(st, clock.elapsedTime); }
   computeHands();
   ctx.right.copy(F.right);
 
@@ -1071,7 +1238,21 @@ function frame() {
   updateCombat(dt);
   moveRig(dt);
   if (xr) updateButtonsXR();
+  updateLevelButton(realDt);
   computeHead();
+  ctx.anchor.copy(F.head).sub(SK.camOff);
+
+  // stamina: odnawia się po chwili bez ataku (szybko przy aurze), wyższy poziom ją powoli zjada
+  P.lastAct += dt;
+  if (aura.powering) P.sta += 30 * dt;
+  else {
+    if (FLY.speed > 1) { P.sta -= 3 * staMul() * dt; P.lastAct = Math.min(P.lastAct, 0.5); }
+    else if (P.lastAct > 0.8) P.sta += CFG.staRegen * dt;
+    P.sta -= CFG.upkeep[P.form] * dt;
+  }
+  P.sta = clamp(P.sta, 0, P.maxSta);
+  if (P.sta <= 1 && !P.exhausted) { P.exhausted = true; msg('Zmęczony! Odpocznij albo naładuj aurę', 2); }
+  if (P.exhausted && P.sta > 30) P.exhausted = false;
 
   enemy.update(dt, t, ctx);
   if (K.kame) K.kame.update(dt, t);
@@ -1096,16 +1277,22 @@ function frame() {
     h.quat.copy(st.quat);
     h.wristPos.copy(st.wrist);
     h.fistPos.copy(st.pos);
-    const S = st.strike;
-    if (S.t >= 0 && S.kind !== 'kick') {
-      const e = S.t < 0.08 ? S.t / 0.08 : Math.max(0, 1 - (S.t - 0.08) / 0.22);
-      _v1.subVectors(S.target, st.pos).clampLength(0, 1.1);
-      h.fistPos.addScaledVector(_v1, e * 0.9);
+    const cur = SK.cur;
+    if (cur && cur.kind !== 'kick' && (cur.side === s || cur.both)) {
+      strikeFist(cur, h.fistPos, st.pos);
+      if (cur.both) h.fistPos.addScaledVector(F.right, s === 'left' ? -0.06 : 0.06);
     }
     h.charge = Math.max(st.punchC, st.kickC, 0);
     kickForAvatar[s] = st.kick;
   }
-  avatar.update({ dt, head: F.head, headFwdFlat: F.fwdFlat, hands: handsForAvatar, flyDir: FLY.dir, flySpeed: FLY.speed, kick: kickForAvatar, glow: aura.level, glowColor: GOLD });
+  avatar.update({ dt: realDt, head: F.head, headFwdFlat: F.fwdFlat, hands: handsForAvatar, flyDir: FLY.dir, flySpeed: FLY.speed, kick: kickForAvatar, glow: aura.level, glowColor: GOLD });
+  // smugi za pięścią i stopą przy mocnych ciosach
+  const cur = SK.cur;
+  const swing = cur && cur.style !== 'jab' && cur.style !== 'kick' && cur.t > cur.S.hit * 0.35 && cur.t < cur.S.hit + 0.08;
+  trails.left.update(dt, handsForAvatar.left.fistPos, swing && cur.kind !== 'kick' && (cur.side === 'left' || cur.both), 0.14);
+  trails.right.update(dt, handsForAvatar.right.fistPos, swing && cur.kind !== 'kick' && (cur.side === 'right' || cur.both), 0.14);
+  trails.footL.update(dt, avatar.footPos.left, swing && cur.kind === 'kick' && cur.side === 'left', 0.18);
+  trails.footR.update(dt, avatar.footPos.right, swing && cur.kind === 'kick' && cur.side === 'right', 0.18);
 
   // regeneracja, komunikaty, błysk
   if (!P.inMelee) P.hp = Math.min(P.maxHp, P.hp + dt * 3);
@@ -1127,4 +1314,4 @@ function frame() {
 renderer.setAnimationLoop(frame);
 
 // do testów w konsoli
-window.__sim = { P, K, F, FLY, HAM, enemy, inputs, stats, aura, avatar, rig, keys, desk, applyDesktopCamera, projectiles, eShots, heightAt, ctx, addKi };
+window.__sim = { P, K, F, FLY, HAM, SK, enemy, inputs, stats, aura, avatar, rig, keys, desk, applyDesktopCamera, projectiles, eShots, heightAt, ctx, addKi, levelUp, boom, impact };

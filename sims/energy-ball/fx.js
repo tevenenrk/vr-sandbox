@@ -1,6 +1,6 @@
 // Efekty: kule energii, promień, wybuchy, aura.
 import * as THREE from 'three';
-import { scene, camera, glowTex, randomDir } from './core.js';
+import { scene, camera, glowTex, randomDir, rand } from './core.js';
 
 const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vector3();
 const _q = new THREE.Quaternion();
@@ -235,17 +235,83 @@ export class Beam {
 }
 
 // ---------------------------------------------------------------------------
-export const boomLight = new THREE.PointLight(0x9fdcff, 0, 0, 2);
+export const boomLight = new THREE.PointLight(0xffd0a0, 0, 0, 2);
 scene.add(boomLight);
 const ringGeo = new THREE.RingGeometry(0.8, 1, 64);
+const waveGeo = new THREE.RingGeometry(0.55, 1, 64).rotateX(-Math.PI / 2);
+const fireGeo = new THREE.SphereGeometry(1, 28, 18);
+
+const NOISE_GLSL = /* glsl */`
+  float hash3(vec3 p) { p = fract(p * 0.3183099 + 0.1); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
+  float vnoise(vec3 x) {
+    vec3 i = floor(x); vec3 f = fract(x); f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(mix(hash3(i), hash3(i + vec3(1,0,0)), f.x), mix(hash3(i + vec3(0,1,0)), hash3(i + vec3(1,1,0)), f.x), f.y),
+               mix(mix(hash3(i + vec3(0,0,1)), hash3(i + vec3(1,0,1)), f.x), mix(hash3(i + vec3(0,1,1)), hash3(i + vec3(1,1,1)), f.x), f.y), f.z);
+  }`;
+// kula ognia/energii: turbulentna powierzchnia, białe jądro → kolor → ciemniejsze brzegi
+const fireMaterial = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 }, uK: { value: 0 }, uHot: { value: new THREE.Color() }, uCool: { value: new THREE.Color() }, uOpacity: { value: 1 }, uSeed: { value: 0 } },
+  vertexShader: NOISE_GLSL + /* glsl */`
+    uniform float uTime; uniform float uSeed;
+    varying vec3 vN; varying vec3 vV; varying float vNz;
+    void main() {
+      float n = vnoise(position * 2.6 + vec3(uSeed, -uTime * 2.5, uSeed)) * 0.65 + vnoise(position * 6.0 + vec3(0.0, -uTime * 4.0, 0.0)) * 0.35;
+      vNz = n;
+      vec3 p = position + normal * (n - 0.45) * 0.55;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      vN = normalize(normalMatrix * normal);
+      vV = normalize(-mv.xyz);
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader: /* glsl */`
+    uniform float uK; uniform vec3 uHot; uniform vec3 uCool; uniform float uOpacity;
+    varying vec3 vN; varying vec3 vV; varying float vNz;
+    void main() {
+      float f = abs(dot(normalize(vN), normalize(vV)));
+      float heat = clamp(f * 1.25 - uK * 1.1 + (vNz - 0.5) * 0.9 + 0.15, 0.0, 1.0);
+      vec3 col = mix(uCool, uHot, heat);
+      col = mix(col, vec3(1.0), pow(heat, 4.0) * (1.0 - uK));
+      float a = clamp((0.2 + f * 0.8) * uOpacity * (0.5 + vNz * 0.8), 0.0, 1.0);
+      gl_FragColor = vec4(col, a);
+    }`,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+});
+// przezroczysta fala uderzeniowa (świeci tylko na krawędzi)
+const domeMaterial = new THREE.ShaderMaterial({
+  uniforms: { uColor: { value: new THREE.Color() }, uOpacity: { value: 1 } },
+  vertexShader: /* glsl */`
+    varying vec3 vN; varying vec3 vV;
+    void main() { vec4 mv = modelViewMatrix * vec4(position, 1.0); vN = normalize(normalMatrix * normal); vV = normalize(-mv.xyz); gl_Position = projectionMatrix * mv; }`,
+  fragmentShader: /* glsl */`
+    uniform vec3 uColor; uniform float uOpacity;
+    varying vec3 vN; varying vec3 vV;
+    void main() { float f = 1.0 - abs(dot(normalize(vN), normalize(vV))); float a = pow(f, 3.0) * uOpacity; gl_FragColor = vec4(uColor * (1.0 + f), a); }`,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+});
+// miękka tekstura dymu
+const smokeTex = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const g = c.getContext('2d');
+  for (let i = 0; i < 14; i++) {
+    const x = 64 + (Math.random() - 0.5) * 50, y = 64 + (Math.random() - 0.5) * 50, r = 22 + Math.random() * 30;
+    const grd = g.createRadialGradient(x, y, 0, x, y, r);
+    grd.addColorStop(0, 'rgba(255,255,255,0.35)'); grd.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = grd; g.fillRect(0, 0, 128, 128);
+  }
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+})();
 
 export class Explosion {
-  constructor(pos, size, { light = true, ground = false, color = 0x3aa8ff, spark = 0xbff0ff, sparks = true } = {}) {
+  // color = kolor energii, hot = kolor jądra; ground = przy ziemi (fala kurzu); smoke = słup dymu
+  constructor(pos, size, { light = true, ground = false, color = 0x3aa8ff, hot = 0xd8f4ff, spark = 0xbff0ff, sparks = true, smoke, fire = true, dome } = {}) {
     this.size = size;
     this.t = 0;
-    this.life = ground ? 3.5 : 1.6;
+    smoke = smoke ?? (ground || size > 0.9);
+    dome = dome ?? size > 0.35;
+    this.life = smoke ? 5.5 : 1.6;
     this.group = new THREE.Group();
     this.group.position.copy(pos);
+
     this.flashMat = new THREE.SpriteMaterial({ map: glowTex, color: 0xffffff, blending: THREE.AdditiveBlending, transparent: true, depthWrite: false, fog: false });
     this.flash = new THREE.Sprite(this.flashMat);
     this.cloudMat = new THREE.SpriteMaterial({ map: glowTex, color, blending: THREE.AdditiveBlending, transparent: true, depthWrite: false, fog: false });
@@ -254,79 +320,168 @@ export class Explosion {
     this.ring = new THREE.Mesh(ringGeo, this.ringMat);
     this.ring2 = new THREE.Mesh(ringGeo, this.ringMat);
     this.ring2.rotation.x = -Math.PI / 2;
+    this.ring2.visible = !ground && size < 2;
     this.group.add(this.cloud, this.flash, this.ring, this.ring2);
 
-    this.n = sparks ? Math.round(30 + Math.min(size, 6) * 80) : 0;
+    if (fire) {
+      this.fireMat = fireMaterial.clone();
+      this.fireMat.uniforms.uHot.value.setHex(hot);
+      this.fireMat.uniforms.uCool.value.setHex(color);
+      this.fireMat.uniforms.uSeed.value = Math.random() * 50;
+      this.fire = new THREE.Mesh(fireGeo, this.fireMat);
+      this.fire.renderOrder = 2;
+      this.group.add(this.fire);
+    }
+    if (dome) {
+      this.domeMat = domeMaterial.clone();
+      this.domeMat.uniforms.uColor.value.setHex(spark);
+      this.dome = new THREE.Mesh(fireGeo, this.domeMat);
+      this.group.add(this.dome);
+    }
+    if (ground) {
+      this.waveMat = new THREE.MeshBasicMaterial({ map: smokeTex, color: 0xd8b48a, transparent: true, depthWrite: false, side: THREE.DoubleSide });
+      this.wave = new THREE.Mesh(waveGeo, this.waveMat);
+      this.wave.position.y = 0.15;
+      this.group.add(this.wave);
+    }
+
+    this.n = sparks ? Math.round(30 + Math.min(size, 6) * 90) : 0;
     if (this.n) {
       this.sPos = new Float32Array(this.n * 3);
       this.sVel = new Float32Array(this.n * 3);
       for (let i = 0; i < this.n; i++) {
-        randomDir(_v1).multiplyScalar((1.5 + Math.random() * 5) * (0.4 + size));
-        this.sVel[i * 3] = _v1.x; this.sVel[i * 3 + 1] = Math.abs(_v1.y) * (ground ? 1 : 0.5) + 1.2; this.sVel[i * 3 + 2] = _v1.z;
+        randomDir(_v1).multiplyScalar((2 + Math.random() * 7) * (0.4 + size));
+        this.sVel[i * 3] = _v1.x; this.sVel[i * 3 + 1] = Math.abs(_v1.y) * (ground ? 1.3 : 0.6) + 1.5; this.sVel[i * 3 + 2] = _v1.z;
       }
       const g = new THREE.BufferGeometry();
       g.setAttribute('position', new THREE.BufferAttribute(this.sPos, 3));
-      this.sMat = new THREE.PointsMaterial({ map: glowTex, color: spark, size: 0.05 + size * 0.05, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: false });
+      this.sMat = new THREE.PointsMaterial({ map: glowTex, color: spark, size: 0.06 + size * 0.06, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: false });
       this.sparks = new THREE.Points(g, this.sMat);
       this.sparks.frustumCulled = false;
       this.group.add(this.sparks);
     }
-    this.dust = [];
-    if (ground) {
-      for (let i = 0; i < 9; i++) {
-        const m = new THREE.SpriteMaterial({ map: glowTex, color: 0xc9a27a, transparent: true, depthWrite: false, opacity: 0 });
+    // słup dymu (unosi się i rozlewa jak grzyb)
+    this.smoke = [];
+    if (smoke) {
+      const n = Math.round(6 + Math.min(size, 7) * 2.6);
+      for (let i = 0; i < n; i++) {
+        const m = new THREE.SpriteMaterial({ map: smokeTex, color: 0x6e5a4a, transparent: true, depthWrite: false, opacity: 0 });
         const s = new THREE.Sprite(m);
-        s.userData = { a: (i / 9) * Math.PI * 2, sp: 0.6 + Math.random() * 0.8, up: Math.random() };
-        this.dust.push(s);
+        const central = i < n * 0.45;
+        const a = Math.random() * Math.PI * 2, r = Math.random() * size * 0.6;
+        s.position.set(Math.cos(a) * r, size * 0.2, Math.sin(a) * r);
+        s.userData = {
+          vel: new THREE.Vector3(Math.cos(a) * (central ? 0.3 : 1.6), central ? rand(1.4, 2.6) : rand(0.3, 0.9), Math.sin(a) * (central ? 0.3 : 1.6)).multiplyScalar(Math.sqrt(size) * 1.2),
+          life: rand(3, 5.2), s0: size * rand(0.8, 1.4), grow: size * rand(1.5, 3.2), rot: rand(-0.5, 0.5),
+        };
+        this.smoke.push(s);
         this.group.add(s);
       }
     }
     scene.add(this.group);
     if (light) {
-      boomLight.color.setHex(color === 0x3aa8ff ? 0x9fdcff : color);
+      boomLight.color.setHex(hot === 0xd8f4ff ? 0xbfe6ff : hot);
       boomLight.position.copy(pos);
-      boomLight.intensity = 60 * size + 10;
+      boomLight.intensity = 90 * size + 15;
     }
   }
   update(dt) {
     this.t += dt;
     const t = this.t, s = this.size;
     const e = 1 - Math.pow(1 - Math.min(1, t / 0.3), 3);
-    this.flash.scale.setScalar(s * (0.5 + 3.5 * e));
-    this.flashMat.opacity = Math.max(0, 0.9 - t / 0.45);
+    this.flash.scale.setScalar(s * (0.5 + 4 * e));
+    this.flashMat.opacity = Math.max(0, 1 - t / 0.35);
     this.cloud.scale.setScalar(s * (1 + 6 * e));
     this.cloudMat.opacity = Math.max(0, 0.9 - t / 1.1);
     this.ring.quaternion.copy(camera.getWorldQuaternion(_q));
-    const rs = s * (0.3 + t * 9);
+    const rs = s * (0.3 + t * 10);
     this.ring.scale.setScalar(rs);
-    this.ring2.scale.setScalar(rs * 1.3);
+    this.ring2.scale.setScalar(rs * 1.4);
     this.ringMat.opacity = Math.max(0, 0.9 - t / 0.6);
+    if (this.fire) {
+      const fe = 1 - Math.pow(1 - Math.min(1, t / 0.55), 2);
+      this.fire.scale.setScalar(s * (0.35 + 1.5 * fe));
+      this.fire.position.y = s * 0.6 * Math.min(1, t / 1.2);
+      this.fireMat.uniforms.uTime.value = t;
+      this.fireMat.uniforms.uK.value = Math.min(1, t / 1.0);
+      this.fireMat.uniforms.uOpacity.value = Math.max(0, 1 - t / 1.1);
+      this.fire.visible = t < 1.1;
+    }
+    if (this.dome) {
+      const de = 1 - Math.pow(1 - Math.min(1, t / 0.45), 2);
+      this.dome.scale.setScalar(s * (0.6 + 6.5 * de));
+      this.domeMat.uniforms.uOpacity.value = Math.max(0, 0.9 - t / 0.5);
+      this.dome.visible = t < 0.5;
+    }
+    if (this.wave) {
+      const we = 1 - Math.pow(1 - Math.min(1, t / 1.6), 2);
+      this.wave.scale.setScalar(s * (1 + 10 * we));
+      this.waveMat.opacity = Math.max(0, 0.75 * (1 - t / 1.8));
+      this.wave.visible = t < 1.8;
+    }
     if (this.n) {
       const p = this.sPos, v = this.sVel;
-      const drag = Math.pow(0.35, dt);
+      const drag = Math.pow(0.4, dt);
       for (let i = 0; i < this.n * 3; i += 3) {
-        v[i + 1] -= 5 * dt;
+        v[i + 1] -= 6 * dt;
         v[i] *= drag; v[i + 1] *= drag; v[i + 2] *= drag;
         p[i] += v[i] * dt; p[i + 1] += v[i + 1] * dt; p[i + 2] += v[i + 2] * dt;
       }
       this.sparks.geometry.attributes.position.needsUpdate = true;
-      this.sMat.opacity = Math.max(0, 1 - t / 1.6);
+      this.sMat.opacity = Math.max(0, 1 - t / 1.8);
+      this.sparks.visible = t < 1.8;
     }
-    for (const d of this.dust) {
-      const u = d.userData;
-      const k = 1 - Math.exp(-t * 1.8);
-      const rr = s * (0.6 + 2.6 * k * u.sp);
-      d.position.set(Math.cos(u.a) * rr, s * (0.2 + k * (0.6 + u.up)), Math.sin(u.a) * rr);
-      d.scale.setScalar(s * (1.5 + 3 * k));
-      d.material.opacity = Math.min(1, t * 4) * Math.max(0, 0.75 * (1 - t / this.life));
+    for (const sm of this.smoke) {
+      const u = sm.userData;
+      const k = Math.min(1, t / u.life);
+      sm.position.addScaledVector(u.vel, dt);
+      u.vel.multiplyScalar(Math.pow(0.55, dt));
+      sm.scale.setScalar(u.s0 + u.grow * Math.sqrt(k));
+      sm.material.rotation += u.rot * dt;
+      sm.material.opacity = Math.min(1, t * 3) * 0.6 * (1 - k);
+      sm.material.color.setHex(t < 0.6 ? 0x9a7656 : 0x5e534c);
     }
     return t < this.life;
   }
   dispose() {
     scene.remove(this.group);
     this.flashMat.dispose(); this.cloudMat.dispose(); this.ringMat.dispose();
+    if (this.fireMat) this.fireMat.dispose();
+    if (this.domeMat) this.domeMat.dispose();
+    if (this.waveMat) this.waveMat.dispose();
     if (this.n) { this.sMat.dispose(); this.sparks.geometry.dispose(); }
-    for (const d of this.dust) d.material.dispose();
+    for (const s of this.smoke) s.material.dispose();
+  }
+}
+
+// smuga za pięścią / stopą przy ciosach
+export class Trail {
+  constructor(color = 0xffe7a0) {
+    this.items = [];
+    for (let i = 0; i < 14; i++) {
+      const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color, blending: THREE.AdditiveBlending, transparent: true, depthWrite: false, opacity: 0, fog: false }));
+      s.visible = false;
+      scene.add(s);
+      this.items.push({ s, life: 0 });
+    }
+    this.i = 0;
+  }
+  update(dt, pos, active, size = 0.12) {
+    if (active) {
+      const it = this.items[this.i];
+      this.i = (this.i + 1) % this.items.length;
+      it.s.position.copy(pos);
+      it.life = 1;
+      it.size = size;
+      it.s.visible = true;
+    }
+    for (const it of this.items) {
+      if (it.life <= 0) continue;
+      it.life -= dt * 5;
+      it.s.material.opacity = Math.max(0, it.life) * 0.7;
+      it.s.scale.setScalar((it.size || 0.1) * (0.5 + it.life));
+      if (it.life <= 0) it.s.visible = false;
+    }
   }
 }
 
@@ -335,7 +490,7 @@ export const explosions = [];
 export const fading = [];
 export function boom(pos, size, opts) { const e = new Explosion(pos, size, opts); explosions.push(e); return e; }
 export function hitSpark(pos, power, color = 0xffffff) {
-  return boom(pos, 0.15 + power * 0.35, { light: false, color, spark: color });
+  return boom(pos, 0.15 + power * 0.35, { light: false, color, spark: color, hot: 0xffffff, fire: power > 0.6, smoke: false, dome: power > 0.5 });
 }
 export function fadeBall(ball) { if (ball) fading.push(ball); }
 export function updateFx(dt, t) {

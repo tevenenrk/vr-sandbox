@@ -134,8 +134,9 @@ export function findSurface(a, b, out) {
 const SCORCH = new THREE.Color(0x3a2a20), GLASS = new THREE.Color(0x1a1412), RIM = new THREE.Color(0xf0c58e);
 export function makeCrater(cx, cz, R) {
   if (state.xrMode === 'ar') return;
-  const depth = R * 0.42;
-  const ext = R * 1.6;
+  const depth = R * 0.5;
+  const ext = R * 2.6;
+  const seed = Math.random() * 10;
   const ix0 = Math.floor((cx - ext + TER.half) / TER.step), ix1 = Math.ceil((cx + ext + TER.half) / TER.step);
   const iz0 = Math.floor((cz - ext + TER.half) / TER.step), iz1 = Math.ceil((cz + ext + TER.half) / TER.step);
   const pos = terrainGeo.attributes.position, col = terrainGeo.attributes.color;
@@ -145,15 +146,23 @@ export function makeCrater(cx, cz, R) {
       const i = iz * TER.n + ix;
       const x = ix * TER.step - TER.half, z = iz * TER.step - TER.half;
       const d = Math.hypot(x - cx, z - cz) / R;
-      if (d > 1.6) continue;
-      let delta = 0;
-      if (d < 1) delta -= depth * (1 - d * d);
-      delta += depth * 0.32 * Math.exp(-Math.pow((d - 1) / 0.22, 2));
-      TER.h[i] = Math.max(-25, TER.h[i] + delta);
-      pos.setY(i, TER.h[i]);
+      if (d > 2.6) continue;
       c.setRGB(col.getX(i), col.getY(i), col.getZ(i));
-      if (d < 1.15) c.lerp(d < 0.45 ? GLASS : SCORCH, (1 - d / 1.15) * 0.85);
-      else c.lerp(RIM, 0.25 * (1 - (d - 1.15) / 0.45));
+      if (d <= 1.6) {
+        let delta = 0;
+        if (d < 1) delta -= depth * (1 - d * d);
+        delta += depth * 0.4 * Math.exp(-Math.pow((d - 1) / 0.24, 2));
+        TER.h[i] = Math.max(-25, TER.h[i] + delta);
+        pos.setY(i, TER.h[i]);
+        if (d < 1.15) c.lerp(d < 0.45 ? GLASS : SCORCH, (1 - d / 1.15) * 0.9);
+        else c.lerp(RIM, 0.3 * (1 - (d - 1.15) / 0.45));
+      }
+      // promienie wyrzuconego materiału wokół krateru
+      if (d > 0.95) {
+        const ang = Math.atan2(z - cz, x - cx);
+        const ray = Math.pow(Math.abs(Math.sin(ang * 6 + seed) * Math.sin(ang * 3.7 + seed * 2)), 3);
+        c.lerp(SCORCH, ray * 0.55 * (1 - (d - 0.95) / 1.65));
+      }
       col.setXYZ(i, c.r, c.g, c.b);
     }
   }
@@ -163,7 +172,23 @@ export function makeCrater(cx, cz, R) {
   for (const r of decoRocks) {
     if (Math.hypot(r.position.x - cx, r.position.z - cz) < R * 1.6) r.position.y = heightAt(r.position.x, r.position.z) + r.userData.lift;
   }
+  // żarzące się dno, które powoli stygnie
+  const glow = new THREE.Mesh(glowDiscGeo, new THREE.MeshBasicMaterial({ map: moltenTex, color: 0xff8a30, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, polygonOffset: true, polygonOffsetFactor: -4, fog: false }));
+  glow.position.set(cx, heightAt(cx, cz) + 0.06, cz);
+  glow.scale.setScalar(R * 0.75);
+  scene.add(glow);
+  glows.push({ m: glow, life: 9 });
 }
+const glowDiscGeo = new THREE.CircleGeometry(1, 32).rotateX(-Math.PI / 2);
+const moltenTex = (() => {
+  const { ctx, tex } = makeCanvasTex(128, 128);
+  const g = ctx.createRadialGradient(64, 64, 0, 64, 64, 64);
+  g.addColorStop(0, 'rgba(255,240,180,1)'); g.addColorStop(0.3, 'rgba(255,150,50,0.9)');
+  g.addColorStop(0.65, 'rgba(200,60,10,0.45)'); g.addColorStop(1, 'rgba(120,20,0,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, 128, 128);
+  return tex;
+})();
+const glows = [];
 
 // --- wgniecenia w ścianach (naklejka + odłamki) ---------------------------------
 const craterTex = (() => {
@@ -213,22 +238,24 @@ export function wallDecal(point, normal, R) {
 // --- odłamki skał ---------------------------------------------------------------
 export const debrisGeo = new THREE.DodecahedronGeometry(1, 0);
 export const debrisMat = new THREE.MeshLambertMaterial({ color: 0xa0664a, flatShading: true });
+const hotMat = new THREE.MeshLambertMaterial({ color: 0x5a2a18, emissive: 0xff6a20, flatShading: true });
 const debris = [];
 export function spawnDebris(pos, R, normal) {
-  const n = Math.min(40, Math.round(8 + R * 5));
+  const n = Math.min(60, Math.round(10 + R * 7));
   const k = Math.sqrt(R);
   for (let i = 0; i < n; i++) {
-    const m = new THREE.Mesh(debrisGeo, debrisMat);
-    const s = (0.06 + Math.random() * 0.2) * Math.min(3, 0.6 + R * 0.35);
+    const hot = i % 3 === 0;
+    const m = new THREE.Mesh(debrisGeo, hot ? hotMat : debrisMat);
+    const s = (0.06 + Math.random() * 0.22) * Math.min(3.5, 0.6 + R * 0.4);
     m.scale.set(s, s * (0.6 + Math.random() * 0.6), s);
     m.position.copy(pos).addScaledVector(normal, 0.3);
     const vel = new THREE.Vector3((Math.random() - 0.5) * 2, (Math.random() - 0.5) * 2, (Math.random() - 0.5) * 2)
       .addScaledVector(normal, 1.6).normalize().multiplyScalar((3 + Math.random() * 7) * k * 0.8);
     vel.y += 2 * k;
     scene.add(m);
-    debris.push({ m, vel, s, life: 6 + Math.random() * 3, resting: false, spin: Math.random() * 8 });
+    debris.push({ m, vel, s, life: 8 + Math.random() * 4, resting: false, spin: Math.random() * 8, hot: hot ? 2.5 + Math.random() * 2 : 0 });
   }
-  while (debris.length > 220) { const d = debris.shift(); scene.remove(d.m); }
+  while (debris.length > 260) { const d = debris.shift(); scene.remove(d.m); }
 }
 export function updateWorld(dt) {
   for (let i = debris.length - 1; i >= 0; i--) {
@@ -245,9 +272,18 @@ export function updateWorld(dt) {
         d.vel.y = Math.abs(d.vel.y) * 0.25; d.vel.x *= 0.4; d.vel.z *= 0.4;
       }
     }
+    if (d.hot > 0) { d.hot -= dt; if (d.hot <= 0) d.m.material = debrisMat; }
     if (d.life < 1) d.m.position.y -= dt * d.s;
     if (d.life <= 0) { scene.remove(d.m); debris.splice(i, 1); }
   }
+  for (let i = glows.length - 1; i >= 0; i--) {
+    const g = glows[i];
+    g.life -= dt;
+    g.m.material.opacity = Math.min(1, g.life / 6);
+    g.m.material.color.setHex(g.life > 5 ? 0xff9a40 : 0xff6020);
+    if (g.life <= 0) { scene.remove(g.m); g.m.material.dispose(); glows.splice(i, 1); }
+  }
+  hotMat.emissiveIntensity = 0.8 + Math.sin(performance.now() * 0.01) * 0.2;
 }
 
 // uderzenie w teren: dno → krater, ściana → wgniecenie. Zwraca normalną powierzchni.
