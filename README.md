@@ -6,7 +6,7 @@ Symulatory WebXR do testowania na Meta Quest 3 / 3S. Wszystko działa w przeglą
 
 | Symulator | Opis |
 |---|---|
-| [⚡ Kula Energii](sims/energy-ball/) | Pustynna arena: kula energii z dłoni, aura mocy, wielka kula nad głową, latanie i kratery w ziemi. Tryb VR albo passthrough (AR). |
+| [⚡ Kula Energii](sims/energy-ball/) | Pustynny kanion: kule energii z dłoni, fala, wielka kula, aura i formy mocy, latanie, rywal do walki wręcz i na dystans, kratery i wgniecenia w ścianach. |
 
 ## Jak uruchomić na Quest
 
@@ -15,22 +15,36 @@ Symulatory WebXR do testowania na Meta Quest 3 / 3S. Wszystko działa w przeglą
 3. Otwórz adres w przeglądarce Meta Quest, wybierz symulator, kliknij **Wejdź w VR** lub **Passthrough (AR)**.
 4. Odłóż kontrolery — gogle przełączą się na dłonie. (Kontrolery też działają: złącz je razem i pchnij do przodu.)
 
-## Sterowanie (Kula Energii)
+## Sterowanie (Kula Energii, kontrolery)
 
-| Ruch | Efekt |
+**Poza walką**
+
+| Przycisk / ruch | Efekt |
 |---|---|
-| Dłonie razem, potem mocne pchnięcie do przodu | mała kula + promień |
-| Ręce w dół + zaciśnięte pięści (kontrolery: oba przyciski chwytu) | aura mocy — szybsze ładowanie, większe kule, szybszy lot |
-| Obie ręce nad głową, potem zamach do przodu | wielka kula nad głową, rzut |
-| Oba spusty (albo szczypnięcie kciuk+palec obiema dłońmi) | lot w kierunku, w który celujesz |
-| Prawa gałka w bok / przycisk B lub Y | obrót o 30° / powrót na środek |
+| Chwyt jednej ręki (trzymaj), puść | kula z tej dłoni |
+| Chwyt obu, dłonie blisko siebie, puść | fala energii |
+| Chwyt obu, ręce nad głową, puść | wielka kula |
+| Chwyt obu, ręce w dół | ładowanie aury (KI) |
+| Oba spusty | lot w kierunku, w który celujesz |
+| Prawa gałka w bok / B lub Y | obrót o 30° / powrót na start |
+
+**Walka wręcz** — włącza się sama, gdy jesteś blisko rywala
+
+| Przycisk | Efekt |
+|---|---|
+| Spust (trzymaj, puść) | pięść — dłużej = mocniej; ręka niżej niż jego klatka wybija go w górę, wyżej — w dół |
+| Chwyt (trzymaj, puść) | kopnięcie tą nogą |
+| X / A (trzymaj) | blok — ręka tam, skąd leci cios (czerwony znacznik); odbija też jego pociski |
+| Oba spusty z rękami w górze, puść ruchem w dół | młot — wbija go w ziemię |
+
+Mocny cios wyrzuca rywala z walki — leci, wbija się w ściany kanionu albo robi krater. Trafienia ładują KI; pełny pasek = kolejna forma mocy (3 formy, każda silniejsza i szybsza).
+
+Na samych dłoniach (bez kontrolerów): pięść = chwyt, szczypnięcie = spust.
 
 ## Podgląd na komputerze
 
-`Spacja` mała kula, `E` wielka kula, `Q` aura, `F` lot, `R` powrót. Przeciągnij myszą, żeby się rozejrzeć.
-
-Lokalnie: `python3 -m http.server 8000` i wejdź na `http://localhost:8000`.
+Lewa ręka: `Q` spust, `A` chwyt, `Z` blok. Prawa: `E`, `D`, `C`. Pozy rąk: `1` razem, `2` w górę, `3` w dół. `Spacja` = fala, `R` = powrót, mysz = rozglądanie.
 
 ## Strojenie gestu
 
-Progi (odległość dłoni, prędkość pchnięcia, czas ładowania) są na górze pliku `sims/energy-ball/main.js` w obiekcie `CFG`.
+Progi (odległość dłoni, czasy ładowania, zasięg ciosów, siła form) są na górze pliku `sims/energy-ball/main.js` w obiekcie `CFG`. Kod jest podzielony na moduły: `world.js` (kanion, kratery), `enemy.js` (rywal), `avatar.js` (ciało gracza), `fx.js` (efekty), `audio.js` (dźwięki).
