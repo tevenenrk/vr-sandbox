@@ -6,7 +6,7 @@ Symulatory WebXR do testowania na Meta Quest 3 / 3S. Wszystko działa w przeglą
 
 | Symulator | Opis |
 |---|---|
-| [⚡ Kula Energii](sims/energy-ball/) | Złącz dłonie → rośnie kula energii. Pchnij dłonie do przodu → wystrzał. Tryb VR (płaskowyż o zmierzchu) albo passthrough (AR w Twoim pokoju). |
+| [⚡ Kula Energii](sims/energy-ball/) | Pustynna arena: kula energii z dłoni, aura mocy, wielka kula nad głową, latanie i kratery w ziemi. Tryb VR albo passthrough (AR). |
 
 ## Jak uruchomić na Quest
 
@@ -15,9 +15,19 @@ Symulatory WebXR do testowania na Meta Quest 3 / 3S. Wszystko działa w przeglą
 3. Otwórz adres w przeglądarce Meta Quest, wybierz symulator, kliknij **Wejdź w VR** lub **Passthrough (AR)**.
 4. Odłóż kontrolery — gogle przełączą się na dłonie. (Kontrolery też działają: złącz je razem i pchnij do przodu.)
 
+## Sterowanie (Kula Energii)
+
+| Ruch | Efekt |
+|---|---|
+| Dłonie razem, potem mocne pchnięcie do przodu | mała kula + promień |
+| Ręce w dół + zaciśnięte pięści (kontrolery: oba przyciski chwytu) | aura mocy — szybsze ładowanie, większe kule, szybszy lot |
+| Obie ręce nad głową, potem zamach do przodu | wielka kula nad głową, rzut |
+| Oba spusty (albo szczypnięcie kciuk+palec obiema dłońmi) | lot w kierunku, w który celujesz |
+| Prawa gałka w bok / przycisk B lub Y | obrót o 30° / powrót na środek |
+
 ## Podgląd na komputerze
 
-Otwórz stronę w Chrome: przytrzymaj **Spację**, żeby ładować, puść — strzał. Przeciągnij myszą, żeby się rozejrzeć.
+`Spacja` mała kula, `E` wielka kula, `Q` aura, `F` lot, `R` powrót. Przeciągnij myszą, żeby się rozejrzeć.
 
 Lokalnie: `python3 -m http.server 8000` i wejdź na `http://localhost:8000`.
 

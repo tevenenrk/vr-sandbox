@@ -41,7 +41,8 @@
       flex: none; padding: 0; font-size: 30px; z-index: 11; display: none;
     }
     kbd { background: rgba(255,255,255,.12); border-radius: 4px; padding: 1px 6px; font-size: 12px; }
-    @media (max-width: 600px) { #overlay { bottom: 110px; } #overlay ol { display: none; } }
+    @media (max-width: 600px), (max-height: 700px) { #overlay ol { display: none; } }
+    @media (max-width: 600px) { #overlay { bottom: 110px; } }
   </style>
   <script type="importmap">
     {
@@ -56,11 +57,13 @@
   <a id="back" href="../../">← wszystkie symulatory</a>
   <div id="overlay">
     <h1>⚡ Kula Energii</h1>
-    <p>Symulator gestów dłoni dla Meta Quest (WebXR, śledzenie dłoni).</p>
+    <p>Pustynna arena dla Meta Quest (WebXR, śledzenie dłoni lub kontrolery).</p>
     <ol>
-      <li><b>Złącz dłonie</b> (jak przy trzymaniu piłki) — między nimi pojawi się kula.</li>
-      <li><b>Trzymaj</b> — kula rośnie (pełne naładowanie ok. 2,5 s).</li>
-      <li><b>Pchnij obie dłonie mocno do przodu</b> — wystrzał!</li>
+      <li><b>Dłonie razem</b> → rośnie kula. <b>Pchnij do przodu</b> → strzał.</li>
+      <li><b>Ręce w dół + zaciśnięte pięści</b> → aura mocy (wszystko jest silniejsze).</li>
+      <li><b>Ręce w górę</b> → nad głową rośnie wielka kula. <b>Zamach do przodu</b> → rzut.</li>
+      <li><b>Oba spusty</b> (albo szczypnięcie obiema dłońmi) → lot tam, gdzie celujesz.</li>
+      <li>Uderzenia w ziemię zostawiają kratery.</li>
     </ol>
     <div class="btns">
       <button id="btn-vr" disabled>Wejdź w VR</button>
