@@ -46,6 +46,10 @@ Ciosy są animowane: kolejny wychodzi dopiero po skończeniu poprzedniego (jedno
 
 Na samych dłoniach (bez kontrolerów): pięść = chwyt, szczypnięcie = spust.
 
+## Własny model rywala
+
+Na stronie symulatora jest przycisk **Własny model rywala (.glb)**. Model musi mieć szkielet Mixamo (kości `mixamorig:Hips`, `LeftArm`, `LeftForeArm`, `LeftHand`, `LeftUpLeg`, `LeftLeg`, `LeftFoot` itd. — tak eksportuje mixamo.com i Meshy). Gra skaluje go do ~1,8 m i sama steruje jego kośćmi (ciosy, garda, reakcje na trafienia, lot), więc animacje z pliku nie są potrzebne. Wybrany plik zostaje zapamiętany w przeglądarce; przycisk **Domyślny** go usuwa. Można też położyć plik jako `sims/energy-ball/models/rival.glb`.
+
 ## Podgląd na komputerze
 
 Lewa ręka: `Q` spust, `A` chwyt, `Z` blok. Prawa: `E`, `D`, `C`. Pozy rąk: `1` razem, `2` w górę, `3` w dół. `Spacja` = fala, `T` = poziom (przytrzymaj = niżej), `R` = powrót, mysz = rozglądanie.

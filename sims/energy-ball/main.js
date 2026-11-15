@@ -16,6 +16,7 @@
 
 import * as THREE from 'three';
 import { XRHandModelFactory } from 'three/addons/webxr/XRHandModelFactory.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { renderer, scene, rig, camera, state, UP, clamp, rand, makeCanvasTex, glowTex } from './core.js';
 import { sfx, HUM_KAME, HUM_SMALL, HUM_GIANT, HUM_AURA } from './audio.js';
 import { EnergyBall, Beam, KAME_STYLE, SMALL_STYLE, GIANT_STYLE, RED_STYLE, Aura, Trail, boom, hitSpark, fadeBall, updateFx } from './fx.js';
@@ -1180,6 +1181,58 @@ const DESK_HELP = 'Podgląd: lewa ręka <kbd>Q</kbd> spust, <kbd>A</kbd> chwyt, 
   btnAR.disabled = !ar;
   if (vr || ar) info.textContent = 'Gotowe! Najlepiej grać na kontrolerach (dłonie też działają: pięść = chwyt, szczypnięcie = spust).';
   else info.innerHTML = 'Brak urządzenia VR.<br>' + DESK_HELP;
+})();
+
+// --- własny model rywala: wybierany z pliku, zapamiętywany w przeglądarce (IndexedDB) ---
+const rivalInfo = document.getElementById('rival-info');
+const gltfLoader = new GLTFLoader();
+function idb(mode, fn) {
+  return new Promise((resolve) => {
+    try {
+      const req = indexedDB.open('kula-energii', 1);
+      req.onupgradeneeded = () => req.result.createObjectStore('files');
+      req.onerror = () => resolve(null);
+      req.onsuccess = () => {
+        try {
+          const tx = req.result.transaction('files', mode);
+          const r = fn(tx.objectStore('files'));
+          tx.oncomplete = () => resolve(r && 'result' in r ? r.result : null);
+          tx.onerror = () => resolve(null);
+        } catch { resolve(null); }
+      };
+    } catch { resolve(null); }
+  });
+}
+function loadRival(buffer, label) {
+  return new Promise((resolve) => {
+    gltfLoader.parse(buffer, '', (gltf) => {
+      const r = enemy.setModel(gltf.scene);
+      if (r.ok) rivalInfo.textContent = `Model rywala: ${label}`;
+      else rivalInfo.textContent = `Ten model nie ma szkieletu Mixamo (brak kości: ${r.missing.slice(0, 4).join(', ')}…)`;
+      resolve(r.ok);
+    }, (err) => { rivalInfo.textContent = 'Nie udało się wczytać modelu: ' + (err && err.message || err); resolve(false); });
+  });
+}
+document.getElementById('rival-file').addEventListener('change', async (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  rivalInfo.textContent = 'Wczytuję…';
+  const buf = await file.arrayBuffer();
+  if (await loadRival(buf, file.name)) await idb('readwrite', (st) => { st.put(buf, 'rival'); st.put(file.name, 'rivalName'); });
+});
+document.getElementById('rival-clear').addEventListener('click', async () => {
+  enemy.clearModel();
+  await idb('readwrite', (st) => { st.delete('rival'); st.delete('rivalName'); });
+  rivalInfo.textContent = 'Domyślny rywal.';
+});
+(async () => {
+  const buf = await idb('readonly', (st) => st.get('rival'));
+  if (buf) { const name = await idb('readonly', (st) => st.get('rivalName')); loadRival(buf, name || 'zapisany'); return; }
+  // albo plik models/rival.glb obok strony (jeśli go dodasz)
+  try {
+    const res = await fetch('models/rival.glb');
+    if (res.ok) loadRival(await res.arrayBuffer(), 'models/rival.glb');
+  } catch { /* brak pliku — zostaje domyślny rywal */ }
 })();
 
 // klawiatura i mysz (podgląd)

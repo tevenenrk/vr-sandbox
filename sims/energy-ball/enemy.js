@@ -11,6 +11,33 @@ const _n = new THREE.Vector3(), _pn = new THREE.Vector3();
 const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _q2 = new THREE.Quaternion();
 const _e = new THREE.Euler();
 const Z = new THREE.Vector3(0, 0, 1);
+const _S = new THREE.Vector3(), _B = new THREE.Vector3(), _C = new THREE.Vector3(), _E = new THREE.Vector3(), _T = new THREE.Vector3(), _P = new THREE.Vector3();
+const _wq = new THREE.Quaternion(), _pq = new THREE.Quaternion();
+const RIG_BONES = ['Hips', 'Spine2', 'Head', 'LeftArm', 'LeftForeArm', 'LeftHand', 'RightArm', 'RightForeArm', 'RightHand',
+  'LeftUpLeg', 'LeftLeg', 'LeftFoot', 'RightUpLeg', 'RightLeg', 'RightFoot'];
+
+// obróć kość tak, by jej dziecko (childPos) wskazywało na target — niezależnie od osi kości w modelu
+function aimBone(bone, childPos, target) {
+  bone.getWorldPosition(_P);
+  _C.subVectors(childPos, _P).normalize();
+  _T.subVectors(target, _P).normalize();
+  if (_C.lengthSq() < 1e-8 || _T.lengthSq() < 1e-8) return;
+  _q.setFromUnitVectors(_C, _T);
+  bone.getWorldQuaternion(_wq);
+  _wq.premultiply(_q);
+  bone.parent.getWorldQuaternion(_pq);
+  bone.quaternion.copy(_pq.invert().multiply(_wq));
+  bone.updateMatrixWorld(true);
+}
+// IK dwóch kości na szkielecie modelu (ramię: Arm→ForeArm→Hand, noga: UpLeg→Leg→Foot)
+function twoBone(a, b, c, target, pole) {
+  a.getWorldPosition(_S); b.getWorldPosition(_B); c.getWorldPosition(_C);
+  const L1 = _S.distanceTo(_B), L2 = _B.distanceTo(_C);
+  const E = solveIK(_S, target, L1, L2, pole, _E);
+  aimBone(a, _B, E);
+  b.getWorldPosition(_B); c.getWorldPosition(_S);
+  aimBone(b, _S, target);
+}
 
 const ZONES = ['high', 'left', 'right', 'low'];
 const ZONE_NAMES = { high: 'z góry', left: 'z lewej', right: 'z prawej', low: 'dołem' };
@@ -56,6 +83,8 @@ export class Enemy {
       B.add(pad);
     }
     B.add(torso, chest, belt, neck, this.head);
+    this.rig = null;
+    this.model = null;
 
     this.limbs = {};
     for (const side of ['left', 'right']) {
@@ -71,6 +100,7 @@ export class Enemy {
       B.add(L.upper, L.elbow, L.fore, L.fist, L.thigh, L.knee, L.shin, L.boot);
       this.limbs[side] = L;
     }
+    this.primParts = [...B.children];
 
     this.auraMat = new THREE.SpriteMaterial({ map: glowTex, color: 0xff3048, blending: THREE.AdditiveBlending, transparent: true, opacity: 0.35, depthWrite: false });
     this.aura = new THREE.Sprite(this.auraMat);
@@ -144,7 +174,62 @@ export class Enemy {
 
   get hittable() { return this.root.visible && this.state !== 'ko' && this.state !== 'gone'; }
   get radius() { return 0.55; }
-  chest(out) { return out.set(0, 0.35, 0).applyMatrix4(this.body.matrixWorld); }
+  chest(out) {
+    if (this.rig) return this.rig.bones.Spine2.getWorldPosition(out);
+    return out.set(0, 0.35, 0).applyMatrix4(this.body.matrixWorld);
+  }
+
+  // --- własny model (szkielet Mixamo) ------------------------------------------------
+  setModel(scene) {
+    const bones = {};
+    const mats = [];
+    scene.traverse((o) => {
+      if (o.isBone) bones[o.name.replace(/^mixamorig[:_]?/i, '')] = o;
+      if (o.isMesh) {
+        o.frustumCulled = false;
+        for (const m of (Array.isArray(o.material) ? o.material : [o.material])) if (m && m.emissive) mats.push(m);
+      }
+    });
+    const missing = RIG_BONES.filter(n => !bones[n]);
+    if (missing.length) return { ok: false, missing };
+    this.clearModel();
+    // skala do ~1,8 m, stopy na wysokości stóp rywala, wyśrodkowanie
+    scene.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(scene);
+    const size = box.getSize(new THREE.Vector3()), center = box.getCenter(new THREE.Vector3());
+    const s = 1.8 / Math.max(0.01, size.y);
+    scene.scale.multiplyScalar(s);
+    scene.position.set(-center.x * s, -box.min.y * s, -center.z * s);
+    const wrap = new THREE.Group();
+    wrap.position.y = -0.86;
+    wrap.add(scene);
+    this.body.add(wrap);
+    this.model = wrap;
+    const rest = [];
+    scene.traverse((o) => { if (o.isBone) rest.push([o, o.quaternion.clone()]); });
+    this.rig = { bones, rest, mats };
+    for (const p of this.primParts) p.visible = false;
+    return { ok: true };
+  }
+  clearModel() {
+    if (this.model) this.body.remove(this.model);
+    this.model = null;
+    this.rig = null;
+    for (const p of this.primParts) p.visible = true;
+  }
+  applyRig() {
+    const { bones, rest } = this.rig;
+    for (const [b, q] of rest) b.quaternion.copy(q);
+    this.root.updateMatrixWorld(true);
+    this.body.getWorldQuaternion(_q2);
+    for (const side of ['left', 'right']) {
+      const L = this.limbs[side], P = side === 'left' ? 'Left' : 'Right';
+      const tgt = this.body.localToWorld(_v1.copy(L.fistT));
+      twoBone(bones[P + 'Arm'], bones[P + 'ForeArm'], bones[P + 'Hand'], tgt, _n.set(L.s * 0.6, -1, -0.5).applyQuaternion(_q2));
+      const ft = this.body.localToWorld(_v1.copy(L.footT));
+      twoBone(bones[P + 'UpLeg'], bones[P + 'Leg'], bones[P + 'Foot'], ft, _n.set(0, 0.2, 1).applyQuaternion(_q2));
+    }
+  }
 
   faceTowards(target, dt, rate = 8) {
     _v1.subVectors(target, this.pos); _v1.y = 0;
@@ -539,9 +624,12 @@ export class Enemy {
     const flying = st === 'fly' || st === 'rush';
     this.auraMat.opacity = flying ? 0.35 + (st === 'rush' ? 0.3 : 0) : st === 'melee' ? 0.25 : 0.1;
     for (const m of this.mats) m.emissive.setRGB(this.flash, this.flash * 0.9, this.flash * 0.8);
+    if (this.rig) for (const m of this.rig.mats) m.emissive.setRGB(this.flash * 0.8, this.flash * 0.7, this.flash * 0.6);
     this.hpSprite.visible = this.root.visible && st !== 'gone' && st !== 'melee';
     this.root.updateMatrixWorld();
+    if (this.rig && this.root.visible) this.applyRig();
     this.chest(this.chestW);
-    this.headW.set(0, 0.72, 0).applyMatrix4(this.body.matrixWorld);
+    if (this.rig) this.rig.bones.Head.getWorldPosition(this.headW).addScaledVector(UP, 0.06);
+    else this.headW.set(0, 0.72, 0).applyMatrix4(this.body.matrixWorld);
   }
 }
