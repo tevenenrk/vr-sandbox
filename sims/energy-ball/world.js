@@ -287,7 +287,9 @@ export function updateWorld(dt) {
 }
 
 // uderzenie w teren: dno → krater, ściana → wgniecenie. Zwraca normalną powierzchni.
+export const CRATER_SCALE = 5;
 export function impact(point, R, outNormal = new THREE.Vector3()) {
+  R = Math.min(26, R * CRATER_SCALE);
   normalAt(point.x, point.z, outNormal);
   if (state.xrMode === 'ar') return outNormal;
   if (outNormal.y > 0.6) makeCrater(point.x, point.z, R);

@@ -29,8 +29,11 @@ Symulatory WebXR do testowania na Meta Quest 3 / 3S. Wszystko działa w przeglą
 | Chwyt obu, ręce w dół | aura: ładuje KI (dużo szybciej przy małym życiu) i odnawia staminę |
 | Y (krótko) | przy pełnym KI — wyższy poziom: mocniejsze ciosy, szybciej spada stamina |
 | Y (przytrzymaj) | niższy poziom |
-| Oba spusty | lot w kierunku, w który celujesz |
+| Oba spusty | lot w kierunku, w który celujesz; dwa szybkie kliknięcia = **turbo** |
 | Prawa gałka w bok / B | obrót o 30° / powrót na start |
+| Klik lewej gałki / klik prawej gałki | agresja rywala (Bierny → Łatwy → Normalny → Trudny) / muzyka wł./wył. |
+
+**Pojedynek fal:** gdy ładujesz falę i patrzysz na rywala, on też ładuje swoją. Kiedy puścisz — fale zderzają się w jednym punkcie. Klikaj spust jak najszybciej: punkt przesuwa się w stronę słabszego, a kto przegra, obrywa wielkim wybuchem.
 
 **Walka wręcz** — włącza się sama, gdy jesteś blisko rywala. Tylko ręce i nogi, bez kul.
 
@@ -52,7 +55,7 @@ Na stronie symulatora jest przycisk **Własny model rywala (.glb)**. Model musi 
 
 ## Podgląd na komputerze
 
-Lewa ręka: `Q` spust, `A` chwyt, `Z` blok. Prawa: `E`, `D`, `C`. Pozy rąk: `1` razem, `2` w górę, `3` w dół. `Spacja` = fala, `T` = poziom (przytrzymaj = niżej), `R` = powrót, mysz = rozglądanie.
+Lewa ręka: `Q` spust, `A` chwyt, `Z` blok. Prawa: `E`, `D`, `C`. Pozy rąk: `1` razem, `2` w górę, `3` w dół. `Spacja` = fala, `T` = poziom (przytrzymaj = niżej), `Shift` + `Q`+`E` = turbo, `G` = agresja, `M` = muzyka, `R` = powrót, mysz = rozglądanie.
 
 ## Strojenie gestu
 

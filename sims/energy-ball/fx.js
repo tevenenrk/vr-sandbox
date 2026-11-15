@@ -85,7 +85,9 @@ const ARCS = 4, ARC_PTS = 9;
 export const KAME_STYLE = { core: 0xeafcff, edge: 0x3fb4ff, glow: 0x3aa8ff, pcol: 0x9fe6ff, particles: 140, gatherMin: 0.1, gatherMax: 0.35, pSpeed: 1, pSize: 0.012, swirl: 2.5, glowScale: 5.5 };
 export const SMALL_STYLE = { core: 0xf4fdff, edge: 0x56c8ff, glow: 0x4ab4ff, pcol: 0xbff0ff, particles: 50, gatherMin: 0.05, gatherMax: 0.2, pSpeed: 0.8, pSize: 0.01, swirl: 3, glowScale: 5 };
 export const GIANT_STYLE = { core: 0xffffff, edge: 0x7fd4ff, glow: 0x6cc4ff, pcol: 0x9fe6ff, particles: 260, gatherMin: 3, gatherMax: 16, pSpeed: 9, pSize: 0.12, swirl: 0.5, glowScale: 3.2 };
-export const RED_STYLE = { core: 0xffe6e6, edge: 0xff3a3a, glow: 0xff2a2a, pcol: 0xff8080, particles: 0, gatherMin: 0.1, gatherMax: 0.2, pSpeed: 1, pSize: 0.01, swirl: 2, glowScale: 5 };
+export const RED_STYLE = { core: 0xffe6e6, edge: 0xff3a3a, glow: 0xff2a2a, pcol: 0xff8080, arc: 0xffc0c0, particles: 0, gatherMin: 0.1, gatherMax: 0.2, pSpeed: 1, pSize: 0.01, swirl: 2, glowScale: 5 };
+export const RED_KAME_STYLE = { core: 0xffeaea, edge: 0xff3a3a, glow: 0xff2a2a, pcol: 0xff9090, arc: 0xffc0c0, particles: 120, gatherMin: 0.15, gatherMax: 0.45, pSpeed: 1.2, pSize: 0.014, swirl: 2.5, glowScale: 5.5 };
+export const CLASH_STYLE = { core: 0xffffff, edge: 0xc88cff, glow: 0xe0b0ff, pcol: 0xffffff, arc: 0xffffff, particles: 60, gatherMin: 0.3, gatherMax: 1.2, pSpeed: 3, pSize: 0.03, swirl: 4, glowScale: 6 };
 
 export class EnergyBall {
   constructor(style = KAME_STYLE) {
@@ -121,7 +123,7 @@ export class EnergyBall {
     this.points.frustumCulled = false;
     for (let i = 0; i < this.pn; i++) this.respawnParticle(i);
 
-    this.arcMat = new THREE.LineBasicMaterial({ color: o === RED_STYLE ? 0xffc0c0 : 0xcff4ff, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false, fog: false });
+    this.arcMat = new THREE.LineBasicMaterial({ color: o.arc || 0xcff4ff, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false, fog: false });
     this.arcs = [];
     for (let i = 0; i < ARCS; i++) {
       const g = new THREE.BufferGeometry();
@@ -209,8 +211,10 @@ export class EnergyBall {
 }
 
 export class Beam {
-  constructor(radius, tail) {
+  constructor(radius, tail, core = 0xeafcff, edge = 0x3fb4ff) {
     this.mat = beamMaterial.clone();
+    this.mat.uniforms.uCore.value.setHex(core);
+    this.mat.uniforms.uEdge.value.setHex(edge);
     this.mesh = new THREE.Mesh(beamGeo, this.mat);
     this.mesh.frustumCulled = false;
     this.mesh.renderOrder = 1;
@@ -488,7 +492,51 @@ export class Trail {
 // wspólne listy efektów
 export const explosions = [];
 export const fading = [];
-export function boom(pos, size, opts) { const e = new Explosion(pos, size, opts); explosions.push(e); return e; }
+// big: wybuch od trafienia w teren/rywala — kilka razy większy błysk i kula ognia
+export function boom(pos, size, opts) {
+  if (opts && opts.big) size = Math.min(22, size * 4);
+  const e = new Explosion(pos, size, opts);
+  explosions.push(e);
+  return e;
+}
+
+// smugi pędu przy turbo locie (przyczepione do kamery)
+export class SpeedLines {
+  constructor() {
+    this.n = 90;
+    this.data = [];
+    const pos = new Float32Array(this.n * 6);
+    for (let i = 0; i < this.n; i++) this.data.push(this.spawn({}, true));
+    this.geo = new THREE.BufferGeometry();
+    this.geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    this.mat = new THREE.LineBasicMaterial({ color: 0xdff4ff, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, fog: false });
+    this.lines = new THREE.LineSegments(this.geo, this.mat);
+    this.lines.frustumCulled = false;
+    this.lines.renderOrder = 25;
+    camera.add(this.lines);
+  }
+  spawn(d, initial) {
+    const a = Math.random() * Math.PI * 2, r = 0.7 + Math.random() * 2.2;
+    d.x = Math.cos(a) * r; d.y = Math.sin(a) * r * 0.8;
+    d.z = initial ? -Math.random() * 14 : -14;
+    d.len = 0.6 + Math.random() * 1.6;
+    return d;
+  }
+  update(dt, k, speed) {
+    this.mat.opacity = k * 0.55;
+    this.lines.visible = k > 0.02;
+    if (!this.lines.visible) return;
+    const p = this.geo.attributes.position.array;
+    for (let i = 0; i < this.n; i++) {
+      const d = this.data[i];
+      d.z += speed * dt * 1.5;
+      if (d.z > 0.5) this.spawn(d, false);
+      p[i * 6] = d.x; p[i * 6 + 1] = d.y; p[i * 6 + 2] = d.z;
+      p[i * 6 + 3] = d.x; p[i * 6 + 4] = d.y; p[i * 6 + 5] = d.z - d.len * (0.5 + k);
+    }
+    this.geo.attributes.position.needsUpdate = true;
+  }
+}
 export function hitSpark(pos, power, color = 0xffffff) {
   return boom(pos, 0.15 + power * 0.35, { light: false, color, spark: color, hot: 0xffffff, fire: power > 0.6, smoke: false, dome: power > 0.5 });
 }

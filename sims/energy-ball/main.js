@@ -18,11 +18,11 @@ import * as THREE from 'three';
 import { XRHandModelFactory } from 'three/addons/webxr/XRHandModelFactory.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { renderer, scene, rig, camera, state, UP, clamp, rand, makeCanvasTex, glowTex } from './core.js';
-import { sfx, HUM_KAME, HUM_SMALL, HUM_GIANT, HUM_AURA } from './audio.js';
-import { EnergyBall, Beam, KAME_STYLE, SMALL_STYLE, GIANT_STYLE, RED_STYLE, Aura, Trail, boom, hitSpark, fadeBall, updateFx } from './fx.js';
+import { sfx, music, HUM_KAME, HUM_SMALL, HUM_GIANT, HUM_AURA, HUM_STRUGGLE } from './audio.js';
+import { EnergyBall, Beam, KAME_STYLE, SMALL_STYLE, GIANT_STYLE, RED_STYLE, RED_KAME_STYLE, CLASH_STYLE, Aura, Trail, SpeedLines, boom, hitSpark, fadeBall, updateFx } from './fx.js';
 import { heightAt, findSurface, impact, pillarHit, wallDecal, spawnDebris, updateWorld, setWorldMode, debrisGeo, debrisMat, isOpen, ARENA_RADIUS } from './world.js';
 import { Avatar } from './avatar.js';
-import { Enemy } from './enemy.js';
+import { Enemy, AGGR } from './enemy.js';
 
 const CFG = {
   closeDist: 0.25,       // dłonie bliżej → fala energii zamiast dwóch kul
@@ -237,7 +237,8 @@ function spend(cost) {
 
 const aura = new Aura(debrisGeo, debrisMat);
 const avatar = new Avatar();
-const FLY = { speed: 0, dir: new THREE.Vector3(0, 0, -1), want: false };
+const FLY = { speed: 0, dir: new THREE.Vector3(0, 0, -1), want: false, turbo: false, prevBoth: false, lastTap: -9 };
+const speedLines = new SpeedLines();
 
 function addKi(x) {
   const was = P.ki;
@@ -266,8 +267,8 @@ function transform(n) {
   aura.level = 1;
   const feet = _v1.copy(F.head); feet.y = heightAt(feet.x, feet.z);
   const near = F.head.y - feet.y < 3;
-  boom(near ? feet : _v2.copy(F.head).addScaledVector(UP, -1), 1.4 + n * 0.5, { color: 0xffc040, spark: 0xfff0a0, ground: near });
-  if (near) impact(feet, 2 + n, _n);
+  boom(near ? feet : _v2.copy(F.head).addScaledVector(UP, -1), 1.4 + n * 0.5, { big: true, color: 0xffc040, hot: 0xfff0c0, spark: 0xfff0a0, ground: near });
+  if (near) impact(feet, 1 + n * 0.5, _n);
   sfx.transform(n);
   P.flash = 0.8; P.flashColor.setHex(0xffd060);
   pulseAll(1, 500);
@@ -342,7 +343,7 @@ enemy.onKO = () => { stats.kos++; P.inMelee = false; P.slowmo = 1.2; msg('NOKAUT
 // ---------------------------------------------------------------------------
 // Ataki energią
 // ---------------------------------------------------------------------------
-const K = { mode: 'none', kame: null, kameC: 0, apartT: 0, hum: null, full: false, giant: null, giantHum: null, auraHum: null };
+const K = { mode: 'none', eBall: null, kame: null, kameC: 0, apartT: 0, hum: null, full: false, giant: null, giantHum: null, auraHum: null };
 const projectiles = [];
 const beams = [];
 
@@ -369,6 +370,7 @@ function fizzleBall(ball) {
 function cancelKi() {
   for (const st of inputs) { if (st.ball) { fizzleBall(st.ball); st.ball = null; st.ballHum = stopHum(st.ballHum); } }
   if (K.kame) { fizzleBall(K.kame); K.kame = null; }
+  if (K.eBall) { fizzleBall(K.eBall); K.eBall = null; enemy.endStruggle(); }
   if (K.giant) { fizzleBall(K.giant); K.giant = null; }
   K.hum = stopHum(K.hum); K.giantHum = stopHum(K.giantHum); K.auraHum = stopHum(K.auraHum);
   aura.powering = false;
@@ -438,7 +440,7 @@ function updateKame(dt) {
     b.group.position.lerp(F.mid, 1 - Math.exp(-dt * 10));
     b.radius *= Math.pow(0.4, dt);
     b.opacity = Math.max(0.2, 1 - K.apartT / CFG.fizzleTime);
-    if (K.apartT > CFG.fizzleTime) { fizzleBall(b); K.kame = null; K.hum = stopHum(K.hum); K.mode = 'wait'; return; }
+    if (K.apartT > CFG.fizzleTime) { fizzleBall(b); K.kame = null; K.hum = stopHum(K.hum); K.mode = 'wait'; enemyReleaseCharge(); return; }
   }
   if (K.hum) K.hum.update(K.kameC, K.apartT > 0 ? 0.5 : 1);
 }
@@ -447,7 +449,8 @@ function fireKame() {
   K.kame = null;
   K.hum = stopHum(K.hum);
   if (!b) return;
-  if (c < CFG.minKame || !spend(14 + 22 * c)) { fizzleBall(b); return; }
+  if (c < CFG.minKame || !spend(14 + 22 * c)) { fizzleBall(b); enemyReleaseCharge(); return; }
+  if (K.eBall && enemy.state === 'charging') { startStruggle(b, c); return; }
   const L = side('left'), R = side('right');
   const dir = _v1.addVectors(L.aim, R.aim);
   if (dir.lengthSq() < 0.1) dir.copy(F.fwd);
@@ -465,6 +468,139 @@ function fireKame() {
   stats.shots++;
   sfx.fire(c);
   pulseAll(0.6 + c * 0.4, 150 + c * 200);
+}
+
+// --- rywal odpowiada falą: ładuje razem z graczem, wypuszcza razem z nim ---
+function enemyMayMirror() {
+  if (!enemy.canCharge() || state.xrMode === 'ar') return false;
+  const d = enemy.chestW.distanceTo(F.head);
+  if (d < 6 || d > 70) return false;
+  _v1.subVectors(enemy.chestW, F.head).setY(0).normalize();
+  return _v1.dot(F.fwdFlat) > 0.4;
+}
+function updateEnemyCharge(dt) {
+  // rywal zaczyna ładować, gdy gracz ładuje falę i patrzy w jego stronę
+  if (K.mode === 'kame' && !K.eBall && enemyMayMirror()) {
+    enemy.startCharging();
+    K.eBall = new EnergyBall(RED_KAME_STYLE);
+    K.eBall.radius = 0.03;
+    enemy.handsCenter(K.eBall.group.position);
+    msg('Rywal też ładuje falę!', 1.5);
+  }
+  if (!K.eBall || BS.active) return;
+  if (enemy.state !== 'charging') { fizzleBall(K.eBall); K.eBall = null; return; }
+  const b = K.eBall;
+  b.radius = THREE.MathUtils.lerp(b.radius, Math.max(0.06, kameRadius(Math.max(K.kameC, 0.3)) * 1.05), 1 - Math.exp(-dt * 6));
+  b.power = Math.max(0.3, K.kameC);
+  enemy.handsCenter(_v1);
+  b.group.position.lerp(_v1, 1 - Math.exp(-dt * 20));
+  b.update(dt, gameTime);
+}
+// gracz przestał ładować bez strzału → rywal wypuszcza swoją falę jako zwykły pocisk
+function enemyReleaseCharge() {
+  if (!K.eBall) return;
+  const b = K.eBall;
+  K.eBall = null;
+  b.gathering = false;
+  const dir = _v1.subVectors(F.head, b.group.position).normalize().clone();
+  eShots.push({ ball: b, vel: dir.multiplyScalar(15), age: 0 });
+  sfx.fire(0.6);
+  enemy.endStruggle();
+}
+
+// --- pojedynek fal ---
+const BS = { active: false, u: 0.5, t: 0, mash: 0, c: 0, extend: 0, pOrigin: new THREE.Vector3(), eOrigin: new THREE.Vector3(), clashPos: new THREE.Vector3(), spark: 0 };
+function startStruggle(pBall, c) {
+  BS.active = true;
+  BS.u = 0.5; BS.t = 0; BS.mash = 0; BS.c = c; BS.extend = 0; BS.spark = 0;
+  BS.pOrigin.copy(pBall.group.position);
+  BS.eOrigin.copy(K.eBall.group.position);
+  BS.pBall = pBall; BS.eBall = K.eBall; K.eBall = null;
+  pBall.gathering = false; BS.eBall.gathering = false;
+  pBall.power = 1; BS.eBall.power = 1;
+  BS.pBeam = new Beam(Math.max(0.08, pBall.radius * 0.85), BS.pOrigin);
+  BS.eBeam = new Beam(Math.max(0.08, BS.eBall.radius * 0.85), BS.eOrigin, 0xffecec, 0xff3a3a);
+  BS.clash = new EnergyBall(CLASH_STYLE);
+  BS.clash.radius = 0.2;
+  BS.clash.group.position.lerpVectors(BS.pOrigin, BS.eOrigin, 0.5);
+  BS.hum = sfx.hum(HUM_STRUGGLE);
+  enemy.startStruggle();
+  FLY.speed = 0;
+  K.mode = 'struggle';
+  sfx.fire(1); sfx.fire(1, true);
+  pulseAll(1, 300);
+  msg('POJEDYNEK FAL! Klikaj spust jak najszybciej!', 3);
+}
+function updateStruggle(dt) {
+  BS.t += dt;
+  BS.extend = Math.min(1, BS.extend + dt / 0.35);
+  // każde wciśnięcie spustu dodaje siły
+  for (const st of inputs) {
+    if (st.trig && !st.pTrig) { BS.mash += 1; pulse(st, 0.6, 35); P.lastAct = 0; }
+  }
+  BS.mash *= Math.exp(-dt * 2);
+  const pF = (1 + BS.c * 0.6) * Math.sqrt(dmgMul()) + BS.mash * 0.5;
+  const surge = Math.sin(BS.t * 1.7) * 0.15 + Math.sin(BS.t * 4.3) * 0.1 + (Math.sin(BS.t * 0.6) > 0.85 ? 0.35 : 0);
+  const eF = enemy.beamForce() * (1 + surge);
+  if (BS.extend >= 1) BS.u = clamp(BS.u + (pF - eF) * 0.09 * dt, 0, 1);
+  BS.pF = pF; BS.eF = eF;
+  // punkt zderzenia przesuwa się w stronę słabszego
+  BS.clashPos.lerpVectors(BS.pOrigin, BS.eOrigin, BS.u);
+  BS.pBeam.head.lerpVectors(BS.pOrigin, BS.clashPos, BS.extend);
+  BS.eBeam.head.lerpVectors(BS.eOrigin, BS.clashPos, BS.extend);
+  const wob = 1 + Math.sin(BS.t * 30) * 0.08;
+  BS.pBeam.radius = Math.max(0.08, BS.pBall.radius * 0.85) * wob * (0.8 + pF * 0.12);
+  BS.eBeam.radius = Math.max(0.08, BS.eBall.radius * 0.85) * wob * (0.8 + eF * 0.12);
+  BS.pBeam.update(gameTime); BS.eBeam.update(gameTime);
+  BS.pBall.group.position.copy(BS.pOrigin); BS.pBall.update(dt, gameTime);
+  BS.eBall.group.position.copy(BS.eOrigin); BS.eBall.update(dt, gameTime);
+  BS.clash.group.position.copy(BS.clashPos);
+  BS.clash.radius = (0.35 + (pF + eF) * 0.09) * (1 + Math.sin(BS.t * 18) * 0.12) * BS.extend;
+  BS.clash.power = 1;
+  BS.clash.update(dt, gameTime);
+  BS.spark -= dt;
+  if (BS.spark <= 0 && BS.extend >= 1) { BS.spark = 0.09; hitSpark(BS.clashPos, 0.5 + Math.random() * 0.4, Math.random() < 0.5 ? 0xd8b0ff : 0xffffff); }
+  if (BS.hum) BS.hum.update(clamp(0.4 + Math.abs(pF - eF) * 0.3, 0, 1));
+  if (Math.random() < dt * 8) pulseAll(0.25 + Math.min(0.5, BS.mash * 0.05), 30);
+  P.msg = BS.u > 0.5 ? 'Przepychasz! Klikaj dalej!' : 'Rywal napiera! KLIKAJ SPUST!'; P.msgT = 0.3;
+  if (!enemy.hittable) endStruggle('draw');
+  else if (BS.u >= 0.985) endStruggle('win');
+  else if (BS.u <= 0.015) endStruggle('lose');
+  else if (BS.t > 25) endStruggle('draw');
+}
+function endStruggle(result) {
+  BS.active = false;
+  for (const b of [BS.pBeam, BS.eBeam]) b.dispose();
+  fadeBall(BS.pBall); fadeBall(BS.eBall); fadeBall(BS.clash);
+  BS.hum = stopHum(BS.hum);
+  K.mode = 'wait';
+  const away = _v1.subVectors(BS.eOrigin, BS.pOrigin).normalize().clone();
+  if (result === 'win') {
+    const pos = enemy.chestW.clone();
+    boom(pos, 2.2 + BS.c, { big: true, color: 0x3aa8ff });
+    sfx.explode(pos, 3);
+    enemy.endStruggle();
+    enemy.hitByBall((40 + 30 * BS.c) * dmgMul(), away, true, ctx);
+    stats.hits++;
+    msg('WYGRAŁEŚ POJEDYNEK!', 2.5);
+  } else if (result === 'lose') {
+    const pos = BS.pOrigin.clone().addScaledVector(away, 0.6);
+    boom(pos, 1.6, { big: true, color: 0xff3a3a, hot: 0xffd0c0, spark: 0xffb0b0 });
+    sfx.explode(pos, 2.5);
+    enemy.endStruggle();
+    hurtPlayer(30 * enemy.A.dmg);
+    rig.position.addScaledVector(away.setY(0).normalize(), -3);
+    if (P.hp > 0) msg('Przegrałeś pojedynek!', 2.5);
+  } else {
+    boom(BS.clashPos.clone(), 2, { big: true, color: 0xc88cff, hot: 0xffffff, spark: 0xe0c0ff });
+    sfx.explode(BS.clashPos, 2.5);
+    enemy.endStruggle();
+    if (enemy.hittable) enemy.damage(10);
+    hurtPlayer(8);
+    msg('Remis — fale się zniosły', 2);
+  }
+  P.hitStop = 0.15;
+  pulseAll(1, 400);
 }
 
 // --- wielka kula (ręce w górę) ---
@@ -516,6 +652,8 @@ function powering(dt) {
 
 function updateKi(dt) {
   const L = side('left'), R = side('right');
+  if (K.mode === 'struggle') { if (BS.active) updateStruggle(dt); return; }
+  updateEnemyCharge(dt);
   // w walce wręcz tylko ręce i nogi — żadnych kul
   if (P.inMelee) {
     if (K.mode !== 'none' && K.mode !== 'wait') { cancelKi(); K.mode = 'wait'; }
@@ -536,7 +674,7 @@ function updateKi(dt) {
       K.mode = (L.ball || R.ball) ? 'single' : 'none';
       break;
     case 'kame':
-      if (!(L.grp && R.grp)) { fireKame(); K.mode = 'wait'; } else updateKame(dt);
+      if (!(L.grp && R.grp)) { fireKame(); if (K.mode !== 'struggle') K.mode = 'wait'; } else updateKame(dt);
       break;
     case 'giant':
       if (!(L.grp && R.grp)) { throwGiant(); K.mode = 'wait'; } else growGiant(dt);
@@ -681,7 +819,8 @@ function resolveStrike(cur) {
     }
     launch = d.normalize().multiplyScalar((16 + c * 26) * Math.sqrt(dm) * (cur.style === 'hammer' ? 1.3 : 1));
   }
-  enemy.hitMelee(dmg, away, launch, ctx, REACT_BY_ZONE[cur.zone] || 'head_back', strong);
+  const knock = launch ? 0 : ({ jab: 2.6, kick: 3.4, power: 4, round: 4.5, hammer: 3 })[cur.style];
+  enemy.hitMelee(dmg, away, launch, ctx, REACT_BY_ZONE[cur.zone] || 'head_back', strong, knock);
   hitSpark(hitPos, strong ? 1 : 0.45, strong ? 0xffe080 : 0xffffff);
   if (strong) boom(hitPos, 0.35 + c * 0.3, { light: true, color: 0xffb040, hot: 0xffffff, spark: 0xfff0c0, smoke: false });
   sfx.punch(Math.min(1, c + (strong ? 0.3 : 0)), hitPos);
@@ -701,7 +840,17 @@ function updateCombat(dt) {
   const bothTrig = L.valid && R.valid && L.trig && R.trig;
   if (bothTrig && F.up && (P.inMelee || enemyNear) && !HAM.armed) { HAM.armed = true; HAM.done = false; HAM.armY = F.mid.y; }
   if (HAM.armed && L.trig && R.trig) HAM.armY = Math.max(HAM.armY, F.mid.y);
-  FLY.want = bothTrig && !P.inMelee && !HAM.armed && state.xrMode !== 'ar';
+  FLY.want = bothTrig && !P.inMelee && !HAM.armed && state.xrMode !== 'ar' && K.mode !== 'struggle';
+  // dwa szybkie kliknięcia obu spustów → turbo lot (na komputerze także Shift)
+  if (bothTrig && !FLY.prevBoth) {
+    const now = clock.elapsedTime;
+    if (now - FLY.lastTap < 0.5 && FLY.want) { FLY.turbo = true; sfx.fire(0.4); msg('TURBO!', 0.8); }
+    FLY.lastTap = now;
+  }
+  if (!FLY.want) FLY.turbo = false;
+  if (FLY.want && keys.ShiftLeft) FLY.turbo = true;
+  FLY.prevBoth = bothTrig;
+  if (K.mode === 'struggle') { for (const st of [L, R]) { st.punchC = -1; st.kickC = -1; } return; }
 
   for (const st of [L, R]) {
     // pięść: spust (ładowanie trwa także w czasie animacji poprzedniego ciosu)
@@ -760,7 +909,7 @@ function moveRig(dt) {
     if (_v1.lengthSq() < 0.05) _v1.copy(F.fwd);
     FLY.dir.lerp(_v1.normalize(), 1 - Math.exp(-dt * 6)).normalize();
   }
-  const target = want ? (P.exhausted ? 4 : CFG.flySpeeds[P.form]) : 0;
+  const target = want ? (P.exhausted ? 4 : CFG.flySpeeds[P.form] * (FLY.turbo ? 2.6 : 1)) : 0;
   FLY.speed += (target - FLY.speed) * (1 - Math.exp(-dt * (want ? 2.5 : 4)));
   if (FLY.speed > 0.01) {
     const step = _v2.copy(FLY.dir).multiplyScalar(FLY.speed * dt);
@@ -796,6 +945,10 @@ function updateButtonsXR() {
         rig.rotateY(ang);
       } else if (Math.abs(x) < 0.3) st.turnLatch = false;
     }
+    // kliknięcie lewej gałki → agresja rywala, prawej → muzyka
+    const stick = !!(gp.buttons[3] && gp.buttons[3].pressed);
+    if (stick && !st.pStick) { if (st.handedness === 'left') cycleAggr(); else toggleMusic(); }
+    st.pStick = stick;
     if (st.handedness === 'right' && st.back && !st.pBack) {
       if (enemy.state === 'melee') enemy.leaveMelee(ctx);
       resetRig();
@@ -836,7 +989,7 @@ function detonate(p, pos, surface) {
     stats.craters++;
   }
   const red = p.ball.o === RED_STYLE;
-  boom(pos, size, { ground: floor, color: red ? 0xff3a3a : 0x3aa8ff, hot: red ? 0xffd0c0 : 0xd8f4ff, spark: red ? 0xffb0b0 : 0xbff0ff });
+  boom(pos, size, { big: true, ground: floor, color: red ? 0xff3a3a : 0x3aa8ff, hot: red ? 0xffd0c0 : 0xd8f4ff, spark: red ? 0xffb0b0 : 0xbff0ff });
   if (size > 0.8) P.hitStop = Math.max(P.hitStop, Math.min(0.12, size * 0.03));
   sfx.explode(pos, size);
   pulseAll(Math.min(1, 0.2 + size * 0.15), 80 + size * 60);
@@ -926,9 +1079,10 @@ function updateProjectiles(dt, t) {
       continue;
     }
     let gone = false;
-    if (pos.distanceTo(F.head) < 0.32 || pos.distanceTo(torso) < 0.4) {
+    const sr = s.ball.radius;
+    if (pos.distanceTo(F.head) < 0.25 + sr || pos.distanceTo(torso) < 0.3 + sr) {
       boom(pos, 0.3, { light: false, color: 0xff3a3a, spark: 0xffb0b0 });
-      hurtPlayer(9 + enemy.level);
+      hurtPlayer((9 + enemy.level) * enemy.A.dmg * (sr > 0.2 ? 2 : 1));
       gone = true;
     } else if (pos.y < heightAt(pos.x, pos.z)) {
       impact(pos, 0.8, _n);
@@ -1042,20 +1196,25 @@ const hud = (() => {
     g.fillStyle = '#10131c'; g.font = 'bold 24px system-ui, sans-serif'; g.fillText(label, 26, y + 26);
   }
   function draw() {
-    const key = `${Math.round(P.hp)}|${Math.round(P.sta)}|${P.exhausted}|${Math.round(P.ki * 100)}|${P.form}|${Math.round(enemy.hp)}|${P.inMelee}|${P.msgT > 0 ? P.msg : ''}`;
+    const key = `${Math.round(P.hp)}|${Math.round(P.sta)}|${P.exhausted}|${Math.round(P.ki * 100)}|${P.form}|${Math.round(enemy.hp)}|${P.inMelee}|${BS.active ? Math.round(BS.u * 50) : -1}|${enemy.aggr}|${P.msgT > 0 ? P.msg : ''}`;
     if (key === last) return;
     last = key;
     g.clearRect(0, 0, 512, 256);
     g.fillStyle = 'rgba(10,12,24,0.78)';
     g.beginPath(); if (g.roundRect) g.roundRect(2, 2, 508, 252, 22); else g.rect(2, 2, 508, 252); g.fill();
-    bar(10, `ŻYCIE ${Math.round(P.hp)}`, P.hp / P.maxHp, '#58e07a');
-    bar(50, P.exhausted ? 'STAMINA — ZMĘCZONY' : `STAMINA ${Math.round(P.sta)}`, P.sta / P.maxSta, P.exhausted ? '#ff8a5c' : '#5cc8ff');
-    bar(90, P.ki >= 1 ? (P.form < 3 ? `KI PEŁNE → Y = poziom ${P.form + 1}` : 'KI PEŁNE') : `KI ${Math.round(P.ki * 100)}%`, P.ki, P.ki >= 1 ? '#fff07a' : '#ffd34d');
-    g.fillStyle = '#ffcf7a'; g.font = 'bold 28px system-ui, sans-serif';
-    g.fillText(`Poziom ${P.form}   KO: ${stats.kos}`, 18, 160);
-    g.fillStyle = '#ff8a95'; g.font = '24px system-ui, sans-serif';
-    g.fillText(`Rywal: ${Math.max(0, Math.round(enemy.hp))}/${enemy.maxHp}${P.inMelee ? '   ⚔ WALKA' : ''}`, 18, 194);
-    if (P.msgT > 0) { g.fillStyle = '#ffffff'; g.font = 'bold 28px system-ui, sans-serif'; g.fillText(P.msg, 18, 236); }
+    bar(8, `ŻYCIE ${Math.round(P.hp)}`, P.hp / P.maxHp, '#58e07a');
+    bar(44, P.exhausted ? 'STAMINA — ZMĘCZONY' : `STAMINA ${Math.round(P.sta)}`, P.sta / P.maxSta, P.exhausted ? '#ff8a5c' : '#5cc8ff');
+    bar(80, P.ki >= 1 ? (P.form < 3 ? `KI PEŁNE → Y = poziom ${P.form + 1}` : 'KI PEŁNE') : `KI ${Math.round(P.ki * 100)}%`, P.ki, P.ki >= 1 ? '#fff07a' : '#ffd34d');
+    bar(116, `RYWAL ${Math.max(0, Math.round(enemy.hp))}/${enemy.maxHp}`, enemy.hp / enemy.maxHp, '#ff4a5a');
+    g.fillStyle = '#ffcf7a'; g.font = 'bold 24px system-ui, sans-serif';
+    g.fillText(`Poz. ${P.form}  KO: ${stats.kos}  ${AGGR[enemy.aggr].name}${P.inMelee ? '  ⚔' : ''}`, 18, 178);
+    if (BS.active) {
+      // pasek pojedynku: niebieski = ty, czerwony = rywal
+      g.fillStyle = '#ff3a3a'; g.fillRect(16, 196, 480, 22);
+      g.fillStyle = '#3aa8ff'; g.fillRect(16, 196, 480 * BS.u, 22);
+      g.fillStyle = '#ffffff'; g.fillRect(16 + 480 * BS.u - 3, 192, 6, 30);
+    }
+    if (P.msgT > 0) { g.fillStyle = '#ffffff'; g.font = 'bold 26px system-ui, sans-serif'; g.fillText(P.msg, 18, BS.active ? 246 : 232); }
     tex.needsUpdate = true;
   }
   return { sprite, draw };
@@ -1089,7 +1248,7 @@ function placeHud() {
     'Chwyt 1 ręki → kula w dłoni, puść → strzał',
     'Chwyt obu, dłonie razem → fala energii',
     'Chwyt obu, ręce w górę → wielka kula',
-    'Oba spusty → lot tam, gdzie celujesz',
+    'Oba spusty → lot,  2× szybko → TURBO',
   ]);
   sec(390, 'Walka wręcz — tylko ręce i nogi', [
     'Spust → pięść,  chwyt → kopnięcie',
@@ -1102,7 +1261,7 @@ function placeHud() {
     'Chwyt obu, ręce w dół → aura ładuje KI',
     '(im mniej życia, tym szybciej)',
     'Pełne KI → Y = wyższy poziom, trzymaj Y = niższy',
-    'B → powrót na start,  prawa gałka → obrót',
+    'B → powrót,  gałki: obrót / klik: agresja, muzyka',
   ]);
   tex.needsUpdate = true;
 }
@@ -1145,7 +1304,7 @@ function setMode(mode) {
   renderer.setClearColor(0x000000, mode === 'ar' ? 0 : 1);
 }
 async function startSession(mode) {
-  sfx.init();
+  startAudio();
   const type = mode === 'ar' ? 'immersive-ar' : 'immersive-vr';
   try {
     const session = await navigator.xr.requestSession(type, { optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking'] });
@@ -1182,6 +1341,30 @@ const DESK_HELP = 'Podgląd: lewa ręka <kbd>Q</kbd> spust, <kbd>A</kbd> chwyt, 
   if (vr || ar) info.textContent = 'Gotowe! Najlepiej grać na kontrolerach (dłonie też działają: pięść = chwyt, szczypnięcie = spust).';
   else info.innerHTML = 'Brak urządzenia VR.<br>' + DESK_HELP;
 })();
+
+// --- ustawienia: agresja rywala i muzyka (zapamiętywane w przeglądarce) ---
+function loadSetting(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } }
+function saveSetting(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* bez zapisu */ } }
+const aggrBtns = [...document.querySelectorAll('#aggr button')];
+const musicBtn = document.getElementById('music-btn');
+function setAggr(i, announce = true) {
+  enemy.setAggr(i);
+  saveSetting('aggr', enemy.aggr);
+  aggrBtns.forEach((b) => b.classList.toggle('on', +b.dataset.a === enemy.aggr));
+  if (announce) msg(`Rywal: ${AGGR[enemy.aggr].name}`, 1.5);
+}
+function cycleAggr() { setAggr((enemy.aggr + 1) % AGGR.length); }
+function setMusic(on) {
+  music.setOn(on);
+  saveSetting('music', on);
+  if (musicBtn) musicBtn.textContent = on ? 'Muzyka: wł.' : 'Muzyka: wył.';
+}
+function toggleMusic() { setMusic(!music.on); msg(music.on ? 'Muzyka włączona' : 'Muzyka wyłączona', 1); }
+aggrBtns.forEach((b) => b.addEventListener('click', () => setAggr(+b.dataset.a, false)));
+if (musicBtn) musicBtn.addEventListener('click', () => { sfx.init(); music.start(); toggleMusic(); });
+setAggr(loadSetting('aggr', 2), false);
+setMusic(loadSetting('music', true));
+function startAudio() { sfx.init(); music.start(); }
 
 // --- własny model rywala: wybierany z pliku, zapamiętywany w przeglądarce (IndexedDB) ---
 const rivalInfo = document.getElementById('rival-info');
@@ -1237,7 +1420,9 @@ document.getElementById('rival-clear').addEventListener('click', async () => {
 
 // klawiatura i mysz (podgląd)
 window.addEventListener('keydown', (e) => {
-  if (['Space', 'KeyQ', 'KeyE', 'KeyA', 'KeyD'].includes(e.code)) sfx.init();
+  if (['Space', 'KeyQ', 'KeyE', 'KeyA', 'KeyD'].includes(e.code)) startAudio();
+  if (e.code === 'KeyG' && !e.repeat) cycleAggr();
+  if (e.code === 'KeyM' && !e.repeat) toggleMusic();
   if (e.code === 'Space') e.preventDefault();
   keys[e.code] = true;
   if (e.code === 'KeyR' && !renderer.xr.isPresenting) { if (enemy.state === 'melee') enemy.leaveMelee(ctx); resetRig(); }
@@ -1245,7 +1430,7 @@ window.addEventListener('keydown', (e) => {
 window.addEventListener('keyup', (e) => { keys[e.code] = false; });
 window.addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
 let drag = null;
-renderer.domElement.addEventListener('pointerdown', (e) => { drag = { x: e.clientX, y: e.clientY }; sfx.init(); });
+renderer.domElement.addEventListener('pointerdown', (e) => { drag = { x: e.clientX, y: e.clientY }; startAudio(); });
 window.addEventListener('pointermove', (e) => {
   if (!drag || renderer.xr.isPresenting) return;
   desk.yaw -= (e.clientX - drag.x) * 0.004;
@@ -1299,7 +1484,7 @@ function frame() {
   P.lastAct += dt;
   if (aura.powering) P.sta += 30 * dt;
   else {
-    if (FLY.speed > 1) { P.sta -= 3 * staMul() * dt; P.lastAct = Math.min(P.lastAct, 0.5); }
+    if (FLY.speed > 1) { P.sta -= (FLY.turbo ? 9 : 3) * staMul() * dt; P.lastAct = Math.min(P.lastAct, 0.5); }
     else if (P.lastAct > 0.8) P.sta += CFG.staRegen * dt;
     P.sta -= CFG.upkeep[P.form] * dt;
   }
@@ -1360,6 +1545,8 @@ function frame() {
   updateHandGlow();
   updateBallLight();
   sfx.updateListener(camera);
+  speedLines.update(realDt, FLY.turbo ? clamp(FLY.speed / 25, 0, 1) : clamp((FLY.speed - 9) / 12, 0, 0.4), FLY.speed);
+  music.intensity = BS.active ? 2 : (P.inMelee || enemy.state === 'rush' || enemy.state === 'charging' || FLY.turbo) ? 1 : 0;
 
   for (const st of inputs) { st.pTrig = st.trig; st.pGrp = st.grp; st.pBack = st.back; }
   renderer.render(scene, camera);
@@ -1367,4 +1554,4 @@ function frame() {
 renderer.setAnimationLoop(frame);
 
 // do testów w konsoli
-window.__sim = { P, K, F, FLY, HAM, SK, enemy, inputs, stats, aura, avatar, rig, keys, desk, applyDesktopCamera, projectiles, eShots, heightAt, ctx, addKi, levelUp, boom, impact };
+window.__sim = { BS, music, P, K, F, FLY, HAM, SK, enemy, inputs, stats, aura, avatar, rig, keys, desk, applyDesktopCamera, projectiles, eShots, heightAt, ctx, addKi, levelUp, boom, impact };

@@ -40,6 +40,9 @@
       position: fixed; right: 16px; bottom: 16px; width: 84px; height: 84px; border-radius: 50%;
       flex: none; padding: 0; font-size: 30px; z-index: 11; display: none;
     }
+    .seg { display: flex; gap: 6px; align-items: center; margin-top: 12px; flex-wrap: wrap; font-size: 14px; color: var(--muted); }
+    .seg button { flex: 1 1 auto; font-size: 13px; padding: 8px 10px; background: rgba(255,255,255,.1); color: var(--text); }
+    .seg button.on { background: linear-gradient(135deg, #ff8a5c, #ffcf7a); color: #1a0c04; }
     .model-row { display: flex; gap: 8px; margin-top: 12px; }
     .filebtn { flex: 1; text-align: center; font-weight: 600; font-size: 14px; padding: 10px; border-radius: 10px; cursor: pointer;
       border: 1px dashed var(--border); color: var(--text); }
@@ -68,16 +71,18 @@
       <li><b>Chwyt obu, ręce w górę</b> → wielka kula. <b>Ręce w dół</b> → ładowanie aury.</li>
       <li><b>Oba spusty</b> → lot tam, gdzie celujesz.</li>
       <li><b>Walka wręcz</b> (gdy rywal blisko): spust = pięść, chwyt = kopnięcie, <b>X/A</b> = blok. Trzymaj dłużej = mocniej.</li>
-      <li>Ciosy ładują KI → kolejne formy mocy.</li>
+      <li>Gdy ładujesz falę, rywal też ładuje — po puszczeniu jest <b>pojedynek fal</b>: klikaj spust jak najszybciej!</li>
     </ol>
     <div class="btns">
       <button id="btn-vr" disabled>Wejdź w VR</button>
       <button id="btn-ar" class="alt" disabled>Passthrough (AR)</button>
     </div>
     <p id="xrinfo">Sprawdzam obsługę WebXR…</p>
+    <div class="seg" id="aggr"><span>Rywal:</span><button data-a="0" type="button">Bierny</button><button data-a="1" type="button">Łatwy</button><button data-a="2" type="button">Normalny</button><button data-a="3" type="button">Trudny</button></div>
     <div class="model-row">
       <label class="filebtn">Własny model rywala (.glb)<input type="file" id="rival-file" accept=".glb,model/gltf-binary" hidden></label>
       <button id="rival-clear" class="small" type="button">Domyślny</button>
+      <button id="music-btn" class="small" type="button">Muzyka: wł.</button>
     </div>
     <p id="rival-info" class="note">Model musi mieć szkielet Mixamo (np. z mixamo.com lub Meshy).</p>
   </div>

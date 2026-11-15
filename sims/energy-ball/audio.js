@@ -175,3 +175,106 @@ export const HUM_KAME = { f0: 70, f1: 220, c0: 400, c1: 3600, g0: 0.08, g1: 0.22
 export const HUM_SMALL = { f0: 160, f1: 320, c0: 900, c1: 3000, g0: 0.03, g1: 0.08, l0: 14, l1: 26, n0: 3000, n1: 5000 };
 export const HUM_GIANT = { f0: 38, f1: 95, c0: 220, c1: 1600, g0: 0.1, g1: 0.3, l0: 3, l1: 8, n0: 400, n1: 1400, noise: 0.35 };
 export const HUM_AURA = { f0: 45, f1: 70, c0: 300, c1: 1500, g0: 0.05, g1: 0.25, l0: 14, l1: 24, n0: 600, n1: 1300, noise: 0.5 };
+export const HUM_STRUGGLE = { f0: 55, f1: 130, c0: 500, c1: 3800, g0: 0.12, g1: 0.3, l0: 18, l1: 32, n0: 1500, n1: 5000, noise: 0.6 };
+
+// ---------------------------------------------------------------------------
+// Muzyka walki — własny, prosty podkład generowany na żywo (perkusja, bas, arpeggio).
+// intensity: 0 spokój, 1 walka, 2 pojedynek fal
+// ---------------------------------------------------------------------------
+class Music {
+  constructor() { this.on = true; this.intensity = 0; this.started = false; this.vol = 0.2; }
+  start() {
+    const c = sfx.ctx;
+    if (!c || this.started) return;
+    this.started = true;
+    this.out = c.createGain();
+    this.out.gain.value = this.on ? this.vol : 0;
+    this.out.connect(sfx.master);
+    this.bpm = 146;
+    this.step = 0;
+    this.next = c.currentTime + 0.15;
+    this.timer = setInterval(() => this.schedule(), 25);
+  }
+  setOn(v) {
+    this.on = v;
+    if (this.out) this.out.gain.setTargetAtTime(v ? this.vol : 0, sfx.ctx.currentTime, 0.2);
+  }
+  schedule() {
+    const c = sfx.ctx;
+    if (!c || c.state !== 'running' || !this.on) { if (c) this.next = Math.max(this.next, c.currentTime + 0.05); return; }
+    const spb = 60 / this.bpm / 4;
+    while (this.next < c.currentTime + 0.12) {
+      this.play(this.step, this.next, spb);
+      this.next += spb;
+      this.step = (this.step + 1) % 64;
+    }
+  }
+  play(s, t, spb) {
+    const bar = Math.floor(s / 16), i = s % 16, I = this.intensity;
+    // akordy: d-moll, B-dur, C-dur, A-dur (i–VI–VII–V)
+    const roots = [0, -4, -2, -5], minor = bar === 0;
+    const root = 73.42 * Math.pow(2, roots[bar] / 12);
+    // perkusja
+    if (i % 4 === 0 || (I >= 1 && (i === 10 || i === 14))) this.kick(t);
+    if (i === 4 || i === 12) this.snare(t, 0.8);
+    if (I >= 2 && i >= 13) this.snare(t, 0.45);
+    if (i % 2 === 0 || I >= 1) this.hat(t, i % 4 === 2 ? 0.6 : 0.3);
+    // bas szesnastkowy
+    const bp = [0, 0, 12, 0, 0, 0, 12, 0, 0, 0, 12, 0, 0, 12, 10, 7];
+    if (I >= 1 || i % 2 === 0) this.bass(t, root * Math.pow(2, bp[i] / 12), spb * 0.9);
+    // arpeggio w walce
+    if (I >= 1 && i % 2 === 0) {
+      const chord = minor ? [0, 3, 7, 12] : [0, 4, 7, 12];
+      const k = (i / 2 + (bar % 2) * 2) % 4;
+      this.lead(t, root * 4 * Math.pow(2, chord[k] / 12), spb * 1.8, I >= 2 ? 0.1 : 0.07);
+    }
+    // akcent na początku taktu
+    if (i === 0 && I >= 1) this.stab(t, root * 2, minor);
+  }
+  env(g, t, v, d) { g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(0.0001, t + d); }
+  kick(t) {
+    const c = sfx.ctx, o = c.createOscillator(), g = c.createGain();
+    o.frequency.setValueAtTime(150, t); o.frequency.exponentialRampToValueAtTime(45, t + 0.12);
+    this.env(g, t, 0.9, 0.2);
+    o.connect(g).connect(this.out); o.start(t); o.stop(t + 0.22);
+  }
+  snare(t, v) {
+    const c = sfx.ctx, n = sfx.noiseSrc(), f = c.createBiquadFilter(), g = c.createGain();
+    f.type = 'bandpass'; f.frequency.value = 1900; f.Q.value = 0.8;
+    this.env(g, t, 0.5 * v, 0.14);
+    n.connect(f).connect(g).connect(this.out); n.start(t); n.stop(t + 0.16);
+    const o = c.createOscillator(), og = c.createGain();
+    o.type = 'triangle'; o.frequency.setValueAtTime(200, t); o.frequency.exponentialRampToValueAtTime(140, t + 0.08);
+    this.env(og, t, 0.3 * v, 0.09);
+    o.connect(og).connect(this.out); o.start(t); o.stop(t + 0.1);
+  }
+  hat(t, v) {
+    const c = sfx.ctx, n = sfx.noiseSrc(), f = c.createBiquadFilter(), g = c.createGain();
+    f.type = 'highpass'; f.frequency.value = 7000;
+    this.env(g, t, 0.18 * v, 0.04);
+    n.connect(f).connect(g).connect(this.out); n.start(t); n.stop(t + 0.05);
+  }
+  bass(t, fr, d) {
+    const c = sfx.ctx, o = c.createOscillator(), f = c.createBiquadFilter(), g = c.createGain();
+    o.type = 'sawtooth'; o.frequency.value = fr;
+    f.type = 'lowpass'; f.frequency.setValueAtTime(900, t); f.frequency.exponentialRampToValueAtTime(250, t + d); f.Q.value = 5;
+    this.env(g, t, 0.28, d);
+    o.connect(f).connect(g).connect(this.out); o.start(t); o.stop(t + d + 0.02);
+  }
+  lead(t, fr, d, v) {
+    const c = sfx.ctx, o = c.createOscillator(), f = c.createBiquadFilter(), g = c.createGain();
+    o.type = 'square'; o.frequency.value = fr;
+    f.type = 'lowpass'; f.frequency.value = 2600;
+    this.env(g, t, v, d);
+    o.connect(f).connect(g).connect(this.out); o.start(t); o.stop(t + d + 0.02);
+  }
+  stab(t, fr, minor) {
+    for (const st of minor ? [0, 3, 7] : [0, 4, 7]) {
+      const c = sfx.ctx, o = c.createOscillator(), g = c.createGain();
+      o.type = 'sawtooth'; o.frequency.value = fr * Math.pow(2, st / 12);
+      this.env(g, t, 0.06, 0.35);
+      o.connect(g).connect(this.out); o.start(t); o.stop(t + 0.37);
+    }
+  }
+}
+export const music = new Music();

@@ -39,6 +39,15 @@ function twoBone(a, b, c, target, pole) {
   aimBone(b, _S, target);
 }
 
+// poziomy agresji rywala: odstępy między strzałami, szarżami do zwarcia i ciosami, czas ostrzeżenia,
+// szansa na serię i blok, mnożnik obrażeń, siła fali w pojedynku
+export const AGGR = [
+  { name: 'Bierny', blast: null, rush: null, atk: null, tele: 0.9, combo: 0, block: 0.08, dmg: 0.5, beam: 1.5, engageCD: 8 },
+  { name: 'Łatwy', blast: [6, 10], rush: [22, 32], atk: [1.8, 2.8], tele: 0.85, combo: 0.08, block: 0.12, dmg: 0.7, beam: 1.9, engageCD: 7 },
+  { name: 'Normalny', blast: [4, 6.5], rush: [14, 22], atk: [1.1, 2.0], tele: 0.7, combo: 0.22, block: 0.2, dmg: 1, beam: 2.4, engageCD: 6 },
+  { name: 'Trudny', blast: [2.4, 4], rush: [8, 13], atk: [0.55, 1.1], tele: 0.5, combo: 0.45, block: 0.3, dmg: 1.4, beam: 3.1, engageCD: 4 },
+];
+const roll = (r) => (r ? rand(r[0], r[1]) : Infinity);
 const ZONES = ['high', 'left', 'right', 'low'];
 const ZONE_NAMES = { high: 'z góry', left: 'z lewej', right: 'z prawej', low: 'dołem' };
 
@@ -121,6 +130,7 @@ export class Enemy {
     this.pos = this.root.position;
     this.vel = new THREE.Vector3();
     this.level = 1;
+    this.aggr = 2;
     this.maxHp = 120;
     this.flash = 0;
     this.recoil = new THREE.Vector3();
@@ -139,11 +149,11 @@ export class Enemy {
     this.vel.set(0, 0, 0);
     this.wp = new THREE.Vector3();
     this.wpT = 0;
-    this.blastT = rand(3, 5);
-    this.rushT = rand(6, 10);
+    this.blastT = roll(this.A.blast);
+    this.rushT = roll(this.A.rush);
     this.engageCD = 2;
     this.attack = null;
-    this.atkT = rand(1, 1.6);
+    this.atkT = 1.4;
     this.combo = 0;
     this.meleeT = 0;
     this.spin = new THREE.Vector3();
@@ -285,7 +295,22 @@ export class Enemy {
     else this.recoil.addScaledVector(dir, 0.25);
   }
   // cios wręcz: reakcja zależna od kierunku; przy mocnym ciosie wyrzut po krótkiej chwili
-  hitMelee(dmg, dir, launchVel, ctx, reaction = 'head_back', strong = false) {
+  get A() { return AGGR[this.aggr] || AGGR[2]; }
+  setAggr(i) {
+    this.aggr = Math.max(0, Math.min(AGGR.length - 1, i));
+    this.blastT = Math.min(this.blastT, roll(this.A.blast));
+    this.rushT = roll(this.A.rush);
+  }
+  // pozycja dłoni (środek) do ładowania fali
+  handsCenter(out) { return this.body.localToWorld(out.set(0, 0.42, 0.42)); }
+  canCharge() { return this.hittable && (this.state === 'fly' || this.state === 'rush'); }
+  startCharging() { this.state = 'charging'; this.timer = 0; this.attack = null; this.markMat.opacity = 0; }
+  startStruggle() { this.state = 'struggle'; this.timer = 0; }
+  endStruggle() { if (this.state === 'struggle' || this.state === 'charging') { this.state = 'fly'; this.wpT = 0; this.rushT = roll(this.A.rush); this.engageCD = 3; } }
+  beamForce() { return this.A.beam * (1 + (this.level - 1) * 0.08); }
+
+  // knock: odrzut na kilka metrów po słabszym ciosie (potem wraca do zwarcia)
+  hitMelee(dmg, dir, launchVel, ctx, reaction = 'head_back', strong = false, knock = 0) {
     if (!this.hittable) return;
     const wasMelee = this.state === 'melee';
     if (this.damage(dmg)) { this.vel.copy(launchVel || _v1.copy(dir).multiplyScalar(8)); if (wasMelee) ctx.meleeEnd(); return; }
@@ -296,8 +321,9 @@ export class Enemy {
       if (wasMelee) this.pendingLaunch = { v: launchVel.clone(), t: 0.09 };
       else this.launch(launchVel, ctx);
     } else if (wasMelee) {
-      this.recoil.addScaledVector(dir, strong ? 0.45 : 0.22);
-      this.atkT = Math.max(this.atkT, 0.5); // chwila oszołomienia
+      this.recoil.addScaledVector(dir, knock || (strong ? 0.45 : 0.22));
+      if (knock > 1) this.recoil.addScaledVector(UP, knock * 0.12);
+      this.atkT = Math.max(this.atkT, 0.6 + knock * 0.2); // chwila oszołomienia
     } else { this.state = 'falling'; this.timer = 0; this.vel.copy(dir).multiplyScalar(6); }
   }
   launch(v, ctx) {
@@ -315,7 +341,7 @@ export class Enemy {
   spinRandom(s) { this.spin.set(rand(-1, 1), rand(-1, 1), rand(-1, 1)).normalize().multiplyScalar(s); }
   blocksHit(charge) {
     if (this.state !== 'melee' || this.reaction) return false;
-    const b = Math.random() < (charge < 0.35 ? 0.3 : 0.1);
+    const b = Math.random() < this.A.block * (charge < 0.35 ? 1.4 : 0.5);
     if (b) this.guardT = 0.4;
     return b;
   }
@@ -347,7 +373,7 @@ export class Enemy {
       const R = 1.3 + speed * 0.07;
       if (normalOverride) { n = _n.copy(normalOverride); wallDecal(point, n, R * 0.9); spawnDebris(point, R, n); }
       else n = impact(point, R, _n);
-      boom(point, 0.5 + speed * 0.03, { ground: n.y > 0.6, color: 0xff7a30, hot: 0xffe0a0, spark: 0xffd090 });
+      boom(point, 0.5 + speed * 0.03, { big: true, ground: n.y > 0.6, color: 0xff7a30, hot: 0xffe0a0, spark: 0xffd090 });
       sfx.explode(point, 0.6 + speed * 0.03);
       ctx.onSlam && ctx.onSlam(point, speed);
       if (this.state !== 'ko') this.damage(Math.min(25, speed * 0.4));
@@ -384,7 +410,7 @@ export class Enemy {
     this.engageCD -= dt;
     this.guardT = Math.max(0, this.guardT - dt);
     this.flash = Math.max(0, this.flash - dt * 4);
-    this.recoil.multiplyScalar(Math.pow(0.03, dt));
+    this.recoil.multiplyScalar(Math.pow(0.18, dt)); // odrzut powoli wygasa → rywal wraca do zwarcia
     const head = ctx.head;
     const dist = this.pos.distanceTo(head);
     const lvl = this.level;
@@ -404,7 +430,7 @@ export class Enemy {
         this.faceTowards(head, dt, 4);
         this.blastT -= dt;
         if (this.blastT <= 0 && dist > 6 && dist < 45) {
-          this.blastT = rand(3.2, 5.5) / (1 + lvl * 0.1);
+          this.blastT = roll(this.A.blast) / (1 + lvl * 0.08);
           this.limbs.right.fistT.set(-0.25, 0.5, 0.55);
           this.limbs.right.fist.getWorldPosition(_v2);
           _v1.copy(head).addScaledVector(UP, -0.2).sub(_v2).normalize();
@@ -421,10 +447,18 @@ export class Enemy {
         this.moveFlying(dt);
         this.faceTowards(head, dt, 8);
         if (dist < 2.6) this.enterMelee(ctx);
-        if (this.timer > 6) { this.state = 'fly'; this.rushT = rand(6, 10); }
+        if (this.timer > 6) { this.state = 'fly'; this.rushT = roll(this.A.rush); }
         break;
       }
       case 'melee': this.updateMelee(dt, t, ctx); break;
+      case 'charging':
+      case 'struggle':
+        this.vel.multiplyScalar(Math.pow(0.02, dt));
+        this.pos.addScaledVector(this.vel, dt);
+        if (this.pos.y < heightAt(this.pos.x, this.pos.z) + 1.3) this.pos.y += dt * 3;
+        this.faceTowards(head, dt, 6);
+        if (this.state === 'charging' && this.timer > 15) this.endStruggle();
+        break;
       case 'falling':
         this.root.rotateOnAxis(_v1.copy(this.spin).normalize(), this.spin.length() * dt);
         this.ballistic(dt, 9.8, ctx);
@@ -445,7 +479,7 @@ export class Enemy {
         this.pos.y += 4 * dt;
         this.root.quaternion.slerp(_q.identity(), 1 - Math.exp(-dt * 5));
         this.faceTowards(head, dt, 3);
-        if (this.timer > 1.2) { this.state = 'fly'; this.wpT = 0; this.rushT = rand(4, 8); this.engageCD = 1.5; }
+        if (this.timer > 1.2) { this.state = 'fly'; this.wpT = 0; this.rushT = roll(this.A.rush); this.engageCD = 2; }
         break;
       case 'ko':
         if (this.vel.lengthSq() > 0.01) this.ballistic(dt, 9.8, ctx);
@@ -482,7 +516,7 @@ export class Enemy {
     this.state = 'melee';
     this.timer = 0;
     this.meleeT = 0;
-    this.atkT = rand(0.9, 1.4);
+    this.atkT = roll(this.A.atk) * 0.8;
     this.attack = null;
     this.combo = 0;
     this.vel.set(0, 0, 0);
@@ -493,7 +527,7 @@ export class Enemy {
     this.attack = null;
     this.pendingLaunch = null;
     this.markMat.opacity = 0;
-    this.engageCD = 4;
+    this.engageCD = this.A.engageCD;
     this.wpT = 0;
     ctx.meleeEnd();
   }
@@ -520,16 +554,17 @@ export class Enemy {
     this.pos.lerp(_v1, 1 - Math.exp(-dt * 7));
     this.faceTowards(ctx.head, dt, 10);
     if (this.pendingLaunch) return;
-    if (this.pos.distanceTo(ctx.head) > 4.5 || this.meleeT > 30) { this.leaveMelee(ctx); return; }
+    if (this.pos.distanceTo(ctx.head) > 8 || this.meleeT > 30) { this.leaveMelee(ctx); return; }
+    if (this.recoil.length() > 0.8) { if (this.attack && !this.attack.struck) { this.attack = null; this.markMat.opacity = 0; } return; }
 
-    const tele = Math.max(0.42, 0.8 - this.level * 0.05) * (this.combo > 0 ? 0.7 : 1);
+    const tele = Math.max(0.36, this.A.tele - (this.level - 1) * 0.04) * (this.combo > 0 ? 0.7 : 1);
     if (!this.attack) {
       this.atkT -= dt;
-      if (this.atkT <= 0 && !this.reaction) {
+      if (this.atkT <= 0 && !this.reaction && this.A.atk) {
         const zone = ZONES[Math.floor(Math.random() * ZONES.length)];
         const hand = zone === 'left' ? 'right' : zone === 'right' ? 'left' : (Math.random() < 0.5 ? 'left' : 'right');
         this.attack = { zone, t: 0, dur: tele, hand, struck: false };
-        if (this.combo === 0 && Math.random() < 0.25 + this.level * 0.05) this.combo = 1 + Math.floor(Math.random() * 2);
+        if (this.combo === 0 && Math.random() < this.A.combo + (this.level - 1) * 0.04) this.combo = 1 + Math.floor(Math.random() * 2);
         sfx.warn();
         ctx.announce && ctx.announce(`Cios ${ZONE_NAMES[zone]}! Blokuj (X/A)`);
       }
@@ -550,13 +585,13 @@ export class Enemy {
           this.react('head_back', 0.6);
           this.combo = 0;
         } else {
-          ctx.hurtPlayer(7 + this.level * 1.5, target.clone());
+          ctx.hurtPlayer((7 + this.level * 1.5) * this.A.dmg, target.clone());
         }
       }
       if (A.t > A.dur + 0.22) {
         this.attack = null;
         if (this.combo > 0) { this.combo--; this.atkT = 0.12; }
-        else this.atkT = rand(0.9, 1.8) / (1 + this.level * 0.08);
+        else this.atkT = roll(this.A.atk) / (1 + (this.level - 1) * 0.08);
       }
     }
   }
@@ -590,6 +625,10 @@ export class Enemy {
         fist.set(s * 0.6, 0.55, -0.05); foot.set(s * 0.35, -0.7, 0);
       } else if (st === 'launched' || st === 'falling') {
         fist.set(s * 0.45, 0.75, -0.1); foot.set(s * 0.25, -0.7, -0.2);
+      } else if (st === 'charging') {
+        fist.set(s * 0.07, 0.4 + Math.sin(t * 20) * 0.01, 0.38); foot.set(s * 0.16, -0.78, 0.0);
+      } else if (st === 'struggle') {
+        fist.set(s * 0.06, 0.45, 0.6); foot.set(s * 0.2, -0.75, -0.15);
       } else if (st === 'melee') {
         fist.set(s * 0.17, 0.48 + Math.sin(t * 5 + s) * 0.03, 0.3);
         foot.set(s * 0.13, -0.78, 0.05);
