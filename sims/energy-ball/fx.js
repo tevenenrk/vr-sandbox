@@ -307,8 +307,9 @@ const smokeTex = (() => {
 
 export class Explosion {
   // color = kolor energii, hot = kolor jądra; ground = przy ziemi (fala kurzu); smoke = słup dymu
-  constructor(pos, size, { light = true, ground = false, color = 0x3aa8ff, hot = 0xd8f4ff, spark = 0xbff0ff, sparks = true, smoke, fire = true, dome, flash = 1 } = {}) {
+  constructor(pos, size, { light = true, ground = false, color = 0x3aa8ff, hot = 0xd8f4ff, spark = 0xbff0ff, sparks = true, smoke, fire = true, dome, flash = 1, ringGrow = 10, flatRing = true } = {}) {
     this.flashK = flash;
+    this.ringGrow = ringGrow;
     this.size = size;
     this.t = 0;
     smoke = smoke ?? (ground || size > 0.9);
@@ -325,7 +326,7 @@ export class Explosion {
     this.ring = new THREE.Mesh(ringGeo, this.ringMat);
     this.ring2 = new THREE.Mesh(ringGeo, this.ringMat);
     this.ring2.rotation.x = -Math.PI / 2;
-    this.ring2.visible = !ground && size < 2;
+    this.ring2.visible = flatRing && !ground && size < 2;
     this.group.add(this.cloud, this.flash, this.ring, this.ring2);
 
     if (fire) {
@@ -399,7 +400,7 @@ export class Explosion {
     this.cloud.scale.setScalar(s * (1 + 6 * e) * Math.max(0.4, this.flashK));
     this.cloudMat.opacity = Math.max(0, 0.9 - t / 1.1) * Math.min(1, this.flashK);
     this.ring.quaternion.copy(camera.getWorldQuaternion(_q));
-    const rs = s * (0.3 + t * 10);
+    const rs = s * (0.3 + t * this.ringGrow);
     this.ring.scale.setScalar(rs);
     this.ring2.scale.setScalar(rs * 1.4);
     this.ringMat.opacity = Math.max(0, 0.9 - t / 0.6);
@@ -540,7 +541,7 @@ export class SpeedLines {
 }
 // iskra trafienia w walce wręcz — wyraźna, ale nie zasłania widoku
 export function meleeSpark(pos, power, color = 0xffffff) {
-  return boom(pos, 0.12 + power * 0.22, { light: false, color, spark: color, hot: 0xffffff, fire: false, smoke: false, dome: false, flash: 0.35 });
+  return boom(pos, 0.12 + power * 0.22, { light: false, color, spark: color, hot: 0xffffff, fire: false, smoke: false, dome: false, flash: 0.35, ringGrow: 3, flatRing: false });
 }
 // błysk teleportu
 export function teleportFlash(pos) {

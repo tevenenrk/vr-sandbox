@@ -1,7 +1,7 @@
 // Ciało gracza widoczne z pierwszej osoby: tułów, ręce (za kontrolerami), nogi (kopnięcia).
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
-import { scene, UP, makeLimb, makeJoint, setLimb, solveIK } from './core.js';
+import { scene, UP, glowTex, makeLimb, makeJoint, setLimb, solveIK, twoBone } from './core.js';
 
 const _a = new THREE.Vector3(), _b = new THREE.Vector3(), _c = new THREE.Vector3(), _pole = new THREE.Vector3();
 const _right = new THREE.Vector3(), _q = new THREE.Quaternion();
@@ -57,6 +57,19 @@ export class Avatar {
     this.hips = new THREE.Vector3();
     this.footPos = { left: new THREE.Vector3(), right: new THREE.Vector3() };
     this.guardK = { left: 0, right: 0 };
+    this.wrist = { left: new THREE.Vector3(), right: new THREE.Vector3() };
+    this.modelMats = [];
+    this.rig = null;
+    this.usePrims = true;
+    // blask naładowanego ciosu (pięść / stopa)
+    this.glows = {};
+    for (const k of ['left', 'right', 'footL', 'footR']) {
+      const g = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color: 0xffffff, blending: THREE.AdditiveBlending, transparent: true, opacity: 0, depthWrite: false, depthTest: false, fog: false }));
+      g.renderOrder = 21;
+      g.visible = false;
+      scene.add(g);
+      this.glows[k] = g;
+    }
     this.legGuardK = { left: 0, right: 0 };
     this.guardPos = new THREE.Vector3();
 
@@ -77,9 +90,63 @@ export class Avatar {
     this.headG.add(headM, hair, band, tail1, tail2);
     this.headG.visible = false;
     this.group.add(this.headG);
+    this.primParts = this.group.children.filter(c => c !== this.headG);
   }
 
   // P: { head, headFwdFlat, hands: {left, right}, flyDir, kick: {left:{t,target}, right}, glow, glowColor, dt }
+  // ciało gracza z modelu postaci (szkielet Mixamo). hue: przesunięcie barwy nasyconych czerwieni stroju
+  setModel(scene, { hue = 0 } = {}) {
+    const bones = {};
+    scene.traverse((o) => {
+      if (o.isBone) bones[o.name.replace(/^mixamorig[:_]?/i, '')] = o;
+      if (o.isMesh) {
+        o.frustumCulled = false;
+        o.material = o.material.clone();
+        if (hue) tintMaterial(o.material, hue);
+        this.modelMats.push(o.material);
+      }
+    });
+    const need = ['Neck', 'Head', 'LeftArm', 'LeftForeArm', 'LeftHand', 'RightArm', 'RightForeArm', 'RightHand', 'LeftUpLeg', 'LeftLeg', 'LeftFoot', 'RightUpLeg', 'RightLeg', 'RightFoot'];
+    if (need.some(n => !bones[n])) return false;
+    scene.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(scene);
+    const size = box.getSize(new THREE.Vector3()), center = box.getCenter(new THREE.Vector3());
+    const k = 1.8 / Math.max(0.01, size.y);
+    scene.scale.multiplyScalar(k);
+    scene.position.set(-center.x * k, -box.min.y * k, -center.z * k);
+    const wrap = new THREE.Group();
+    wrap.add(scene);
+    this.group.add(wrap);
+    wrap.updateMatrixWorld(true);
+    this.neckOffset = bones.Neck.getWorldPosition(new THREE.Vector3());
+    const rest = [];
+    scene.traverse((o) => { if (o.isBone) rest.push([o, o.quaternion.clone()]); });
+    this.rig = { bones, rest, wrap };
+    // ukryj proste kształty — zostają tylko efekty
+    for (const p of this.primParts) p.visible = false;
+    this.usePrims = false;
+    return true;
+  }
+  applyRig(P, fwd) {
+    const { bones, rest, wrap } = this.rig;
+    for (const [b, q] of rest) b.quaternion.copy(q);
+    bones.Head.scale.setScalar(P.showHead ? 1 : 0.001); // z pierwszej osoby bez głowy (nie zasłania widoku)
+    wrap.quaternion.setFromUnitVectors(_c.set(0, 0, 1), fwd);
+    wrap.position.copy(this.neck).sub(_a.copy(this.neckOffset).applyQuaternion(wrap.quaternion));
+    wrap.updateMatrixWorld(true);
+    _right.crossVectors(fwd, UP).normalize();
+    for (const side of ['left', 'right']) {
+      const S = side === 'left' ? 'Left' : 'Right', sgn = side === 'left' ? -1 : 1;
+      const h = P.hands[side];
+      if (h && h.valid && this.wrist[side]) {
+        _pole.copy(UP).multiplyScalar(-1).addScaledVector(_right, 0.6 * sgn).addScaledVector(fwd, -0.4);
+        twoBone(bones[S + 'Arm'], bones[S + 'ForeArm'], bones[S + 'Hand'], this.wrist[side], _pole);
+      }
+      _pole.copy(fwd).addScaledVector(UP, 0.2);
+      twoBone(bones[S + 'UpLeg'], bones[S + 'Leg'], bones[S + 'Foot'], this.footPos[side], _pole);
+    }
+  }
+
   update(P) {
     const dt = P.dt;
     // tułów obraca się za głową z opóźnieniem
@@ -121,6 +188,7 @@ export class Avatar {
       // nadgarstek: za pięścią (w stronę łokcia)
       const W = _b.set(0, 0, 0.075).applyQuaternion(h.quat).add(h.fistPos);
       if (h.isHand) W.copy(h.wristPos);
+      this.wrist[side].copy(W);
       _pole.copy(UP).multiplyScalar(-1).addScaledVector(_right, 0.6 * sgn).addScaledVector(fwd, -0.4);
       const E = solveIK(S, W, ARM_L1, ARM_L2, _pole, _c);
       setLimb(a.upper, S, E);
@@ -129,6 +197,7 @@ export class Avatar {
       const bandStart = _pole.copy(W).lerp(E, 0.22);
       setLimb(a.band, bandStart, W);
       a.fistMat.emissive.copy(P.glowColor).multiplyScalar(P.glow * 0.5 + h.charge * 0.9);
+      this.chargeGlow(this.glows[side], _c.copy(h.fistPos).lerp(P.head, 0.12), h.charge, P.t);
     }
 
     // nogi
@@ -184,7 +253,16 @@ export class Avatar {
 
     // świecenie przy aurze / formach
     for (const m of this.mats) m.emissive.copy(P.glowColor).multiplyScalar(P.glow * 0.35);
-    this.headG.visible = !!P.showHead;
+    if (P.kickCharge) {
+      this.chargeGlow(this.glows.footL, this.footPos.left, P.kickCharge.left, P.t);
+      this.chargeGlow(this.glows.footR, this.footPos.right, P.kickCharge.right, P.t);
+    }
+    if (this.rig) {
+      this.applyRig(P, fwd);
+      for (const m of this.modelMats) if (m.emissive) m.emissive.copy(P.glowColor).multiplyScalar(P.glow * 0.15);
+    }
+    this.headG.visible = !!P.showHead && !this.rig;
+    if (!this.usePrims) for (const p of this.primParts) p.visible = false;
     if (P.showHead) {
       this.headG.position.copy(P.head).addScaledVector(UP, -0.02);
       this.headG.quaternion.setFromUnitVectors(_c.set(0, 0, -1), fwd);
@@ -192,3 +270,36 @@ export class Avatar {
   }
 }
 void _q;
+
+// blask ładowania: biały → żółty (średni cios) → pulsujący pomarańczowy (mocny cios)
+Avatar.prototype.chargeGlow = function (g, pos, c, t) {
+  g.visible = c > 0.02;
+  if (!g.visible) { g.material.opacity = 0; return; }
+  g.position.copy(pos);
+  let col = 0xffffff, size = 0.07 + c * 0.12, op = 0.35 + c * 0.4;
+  if (c >= 0.7) { col = 0xff7a20; size = 0.22 + Math.sin((t || 0) * 18) * 0.04; op = 0.95; }
+  else if (c >= 0.35) { col = 0xffe040; size = 0.13 + c * 0.1; op = 0.75; }
+  g.material.color.setHex(col);
+  g.material.opacity = op;
+  g.scale.setScalar(size);
+};
+
+// przesunięcie barwy tylko mocno nasyconych czerwieni (strój), skóra i złote zdobienia bez zmian
+export function tintMaterial(mat, hue) {
+  mat.onBeforeCompile = (sh) => {
+    sh.uniforms.uHue = { value: hue };
+    sh.fragmentShader = 'uniform float uHue;\n' + sh.fragmentShader.replace('#include <map_fragment>', `#include <map_fragment>
+      {
+        vec3 c = diffuseColor.rgb;
+        float mx = max(c.r, max(c.g, c.b)), mn = min(c.r, min(c.g, c.b));
+        float sat = mx > 0.0001 ? (mx - mn) / mx : 0.0;
+        float redness = smoothstep(0.0, 0.25, c.r - max(c.g, c.b) * 1.15);
+        float m = smoothstep(0.45, 0.7, sat) * redness;
+        const vec3 k = vec3(0.57735);
+        float ca = cos(uHue), sa = sin(uHue);
+        vec3 shifted = c * ca + cross(k, c) * sa + k * dot(k, c) * (1.0 - ca);
+        diffuseColor.rgb = mix(c, shifted, m);
+      }`);
+  };
+  mat.needsUpdate = true;
+}

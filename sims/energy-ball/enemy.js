@@ -1,7 +1,7 @@
 // Przeciwnik: lata po kanionie, strzela, wchodzi w walkę wręcz, reaguje na ciosy,
 // upada, wbija się w ściany i wraca.
 import * as THREE from 'three';
-import { scene, UP, glowTex, makeLimb, makeJoint, setLimb, solveIK, makeCanvasTex, rand, clamp } from './core.js';
+import { scene, UP, glowTex, makeLimb, makeJoint, setLimb, solveIK, twoBone, makeCanvasTex, rand, clamp } from './core.js';
 import { heightAt, findSurface, impact, wallDecal, spawnDebris, pillarHit, isOpen, ARENA_RADIUS } from './world.js';
 import { boom } from './fx.js';
 import { sfx } from './audio.js';
@@ -11,47 +11,22 @@ const _n = new THREE.Vector3(), _pn = new THREE.Vector3();
 const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _q2 = new THREE.Quaternion();
 const _e = new THREE.Euler();
 const Z = new THREE.Vector3(0, 0, 1);
-const _S = new THREE.Vector3(), _B = new THREE.Vector3(), _C = new THREE.Vector3(), _E = new THREE.Vector3(), _T = new THREE.Vector3(), _P = new THREE.Vector3();
-const _wq = new THREE.Quaternion(), _pq = new THREE.Quaternion();
 const RIG_BONES = ['Hips', 'Spine2', 'Head', 'LeftArm', 'LeftForeArm', 'LeftHand', 'RightArm', 'RightForeArm', 'RightHand',
   'LeftUpLeg', 'LeftLeg', 'LeftFoot', 'RightUpLeg', 'RightLeg', 'RightFoot'];
-
-// obróć kość tak, by jej dziecko (childPos) wskazywało na target — niezależnie od osi kości w modelu
-function aimBone(bone, childPos, target) {
-  bone.getWorldPosition(_P);
-  _C.subVectors(childPos, _P).normalize();
-  _T.subVectors(target, _P).normalize();
-  if (_C.lengthSq() < 1e-8 || _T.lengthSq() < 1e-8) return;
-  _q.setFromUnitVectors(_C, _T);
-  bone.getWorldQuaternion(_wq);
-  _wq.premultiply(_q);
-  bone.parent.getWorldQuaternion(_pq);
-  bone.quaternion.copy(_pq.invert().multiply(_wq));
-  bone.updateMatrixWorld(true);
-}
-// IK dwóch kości na szkielecie modelu (ramię: Arm→ForeArm→Hand, noga: UpLeg→Leg→Foot)
-function twoBone(a, b, c, target, pole) {
-  a.getWorldPosition(_S); b.getWorldPosition(_B); c.getWorldPosition(_C);
-  const L1 = _S.distanceTo(_B), L2 = _B.distanceTo(_C);
-  const E = solveIK(_S, target, L1, L2, pole, _E);
-  aimBone(a, _B, E);
-  b.getWorldPosition(_B); c.getWorldPosition(_S);
-  aimBone(b, _S, target);
-}
 
 // poziomy agresji rywala: odstępy między strzałami, szarżami do zwarcia i ciosami, czas ostrzeżenia,
 // szansa na serię i blok, mnożnik obrażeń, siła fali w pojedynku
 export const AGGR = [
-  { name: 'Bierny', blast: null, rush: null, atk: null, tele: 0.9, combo: 0, block: 0.08, dmg: 0.5, beam: 1.5, engageCD: 8 },
-  { name: 'Łatwy', blast: [6, 10], rush: [22, 32], atk: [1.8, 2.8], tele: 0.85, combo: 0.08, block: 0.12, dmg: 0.7, beam: 1.9, engageCD: 7 },
-  { name: 'Normalny', blast: [4, 6.5], rush: [14, 22], atk: [1.1, 2.0], tele: 0.7, combo: 0.22, block: 0.2, dmg: 1, beam: 2.4, engageCD: 6 },
-  { name: 'Trudny', blast: [2.4, 4], rush: [8, 13], atk: [0.55, 1.1], tele: 0.5, combo: 0.45, block: 0.3, dmg: 1.4, beam: 3.1, engageCD: 4 },
+  { name: 'Bierny', blast: null, rush: null, atk: null, tele: 0.9, combo: 0, block: 0.08, dmg: 0.5, beam: 1.0, engageCD: 8 },
+  { name: 'Łatwy', blast: [6, 10], rush: [22, 32], atk: [1.8, 2.8], tele: 0.85, combo: 0.08, block: 0.12, dmg: 0.7, beam: 1.35, engageCD: 7 },
+  { name: 'Normalny', blast: [4, 6.5], rush: [14, 22], atk: [1.1, 2.0], tele: 0.7, combo: 0.22, block: 0.2, dmg: 1, beam: 1.75, engageCD: 6 },
+  { name: 'Trudny', blast: [2.4, 4], rush: [8, 13], atk: [0.55, 1.1], tele: 0.5, combo: 0.45, block: 0.3, dmg: 1.4, beam: 2.2, engageCD: 4 },
 ];
 // profile treningowe: manekin (podlatuje, nie atakuje) i powolny napastnik (do nauki bloków)
 export const TRAIN = {
-  dummy: { name: 'Trening', blast: null, rush: [2, 3], atk: null, tele: 1, combo: 0, block: 0, dmg: 0.3, beam: 1.2, engageCD: 2 },
-  idle: { name: 'Trening', blast: null, rush: null, atk: null, tele: 1, combo: 0, block: 0, dmg: 0.3, beam: 1.2, engageCD: 6 },
-  attacker: { name: 'Trening', blast: null, rush: [2, 3], atk: [1.6, 2.2], tele: 1.3, combo: 0, block: 0, dmg: 0.3, beam: 1.2, engageCD: 2 },
+  dummy: { name: 'Trening', blast: null, rush: [2, 3], atk: null, tele: 1, combo: 0, block: 0, dmg: 0.3, beam: 1.0, engageCD: 2 },
+  idle: { name: 'Trening', blast: null, rush: null, atk: null, tele: 1, combo: 0, block: 0, dmg: 0.3, beam: 1.0, engageCD: 6 },
+  attacker: { name: 'Trening', blast: null, rush: [2, 3], atk: [1.6, 2.2], tele: 1.3, combo: 0, block: 0, dmg: 0.3, beam: 1.0, engageCD: 2 },
 };
 const MAX_FORMS = [0, 1, 1, 2];
 const roll = (r) => (r ? rand(r[0], r[1]) : Infinity);
@@ -295,6 +270,7 @@ export class Enemy {
     this.reaction = { type, t: 0, dur: 0.32 + amp * 0.18, amp };
   }
   hitByBall(dmg, dir, strong, ctx) {
+    if (this.remote) { this.flash = 1; this.react('head_back', strong ? 1.5 : 1); ctx.netHit && ctx.netHit({ dmg, dir: dir.toArray(), strong, ball: true }); return; }
     if (!this.hittable) return;
     const wasMelee = this.state === 'melee';
     if (this.damage(dmg)) { this.vel.copy(dir).multiplyScalar(strong ? 25 : 10); if (wasMelee) ctx.meleeEnd(); return; }
@@ -314,7 +290,7 @@ export class Enemy {
   }
   // czy pora na przemianę (mniej życia → wyższa forma)
   wantsPowerUp() {
-    if (this.trainProfile || this.state !== 'fly' || !this.hittable) return false;
+    if (this.remote || this.trainProfile || this.state !== 'fly' || !this.hittable) return false;
     const max = MAX_FORMS[this.aggr] || 0;
     if (this.form >= max) return false;
     const th = this.form === 0 ? 0.5 : 0.25;
@@ -339,7 +315,12 @@ export class Enemy {
   beamForce() { return this.A.beam * (1 + (this.level - 1) * 0.08) * (1 + this.form * 0.25); }
 
   // knock: odrzut na kilka metrów po słabszym ciosie (potem wraca do zwarcia)
-  hitMelee(dmg, dir, launchVel, ctx, reaction = 'head_back', strong = false, knock = 0) {
+  hitMelee(dmg, dir, launchVel, ctx, reaction = 'head_back', strong = false, knock = 0, extra = {}) {
+    if (this.remote) {
+      this.flash = 1; this.react(reaction, strong ? 1.7 : 1);
+      ctx.netHit && ctx.netHit({ dmg, dir: dir.toArray(), launch: launchVel ? launchVel.toArray() : null, knock, reaction, ...extra });
+      return;
+    }
     if (!this.hittable) return;
     const wasMelee = this.state === 'melee';
     if (this.damage(dmg)) { this.vel.copy(launchVel || _v1.copy(dir).multiplyScalar(8)); if (wasMelee) ctx.meleeEnd(); return; }
@@ -368,9 +349,10 @@ export class Enemy {
     this.engageCD = 2.5;
   }
   spinRandom(s) { this.spin.set(rand(-1, 1), rand(-1, 1), rand(-1, 1)).normalize().multiplyScalar(s); }
-  blocksHit(charge) {
-    if (this.state !== 'melee' || this.reaction) return false;
+  blocksHit(charge, attackerForm = 0) {
+    if (this.remote || this.state !== 'melee' || this.reaction) return false;
     const b = Math.random() < this.A.block * (charge < 0.35 ? 1.4 : 0.5);
+    if (b && charge >= 0.7 && attackerForm > this.form) return 'pierced';
     if (b) this.guardT = 0.4;
     return b;
   }
@@ -434,7 +416,42 @@ export class Enemy {
   }
 
   // --- AI ------------------------------------------------------------------------
+  // --- tryb gry we dwoje: rywal = drugi gracz (pozycje z sieci) --------------------
+  setRemote(on) {
+    this.remote = on ? { has: false, head: new THREE.Vector3(), fwd: new THREE.Vector3(0, 0, 1), hands: { left: new THREE.Vector3(), right: new THREE.Vector3() }, feet: { left: new THREE.Vector3(), right: new THREE.Vector3() }, vel: new THREE.Vector3(), st: 'fly', aura: 0 } : null;
+    this.attack = null; this.markMat.opacity = 0; this.reaction = null; this.pendingLaunch = null;
+    if (!on) this.spawn();
+  }
+  applyRemote(m) {
+    const R = this.remote;
+    if (!R) return;
+    R.has = true;
+    R.head.fromArray(m.h); R.fwd.set(m.f[0], 0, m.f[1]).normalize();
+    R.hands.left.fromArray(m.lh); R.hands.right.fromArray(m.rh);
+    R.feet.left.fromArray(m.lf); R.feet.right.fromArray(m.rf);
+    R.vel.fromArray(m.v || [0, 0, 0]);
+    R.st = m.st || 'fly';
+    R.aura = m.au || 0;
+    if (Math.round(this.hp) !== Math.round(m.hp) || this.maxHp !== m.mhp) { this.hp = m.hp; this.maxHp = m.mhp; this.drawHp(); }
+    this.form = m.fm || 0;
+  }
+  updateRemote(dt, t, ctx) {
+    const R = this.remote;
+    this.root.visible = R.has;
+    if (!R.has) return;
+    this.state = R.st === 'launched' ? 'launched' : 'fly';
+    this.vel.copy(R.vel);
+    // miednica pod głową drugiego gracza
+    _v1.copy(R.head).addScaledVector(UP, -0.68).addScaledVector(R.fwd, -0.08);
+    if (this.pos.distanceTo(_v1) > 6) this.pos.copy(_v1); else this.pos.lerp(_v1, 1 - Math.exp(-dt * 18));
+    _m.lookAt(R.fwd, _v2.set(0, 0, 0), UP);
+    _q.setFromRotationMatrix(_m);
+    this.root.quaternion.slerp(_q, 1 - Math.exp(-dt * 12));
+    this.pose(dt, t, ctx);
+  }
+
   update(dt, t, ctx) {
+    if (this.remote) { this.timer += dt; this.flash = Math.max(0, this.flash - dt * 4); this.updateRemote(dt, t, ctx); return; }
     this.timer += dt;
     this.engageCD -= dt;
     this.guardT = Math.max(0, this.guardT - dt);
@@ -592,7 +609,10 @@ export class Enemy {
       if (this.atkT <= 0 && !this.reaction && this.A.atk) {
         const zone = ZONES[Math.floor(Math.random() * ZONES.length)];
         const hand = zone === 'left' ? 'right' : zone === 'right' ? 'left' : (Math.random() < 0.5 ? 'left' : 'right');
-        this.attack = { zone, t: 0, dur: tele, hand, struck: false };
+        // naładowany cios (pomarańczowy znacznik) — przebija blok, jeśli rywal ma wyższą formę
+        const charged = Math.random() < 0.15 + this.form * 0.2;
+        this.attack = { zone, t: 0, dur: tele * (charged ? 1.25 : 1), hand, struck: false, charged };
+        this.markMat.color.setHex(charged ? 0xff8a10 : 0xff2020);
         if (this.combo === 0 && Math.random() < this.A.combo + (this.level - 1) * 0.04) this.combo = 1 + Math.floor(Math.random() * 2);
         sfx.warn();
         ctx.announce && ctx.announce(`Cios ${ZONE_NAMES[zone]}! Blokuj (X/A)`);
@@ -608,7 +628,11 @@ export class Enemy {
       if (!A.struck && A.t >= A.dur) {
         A.struck = true;
         this.markMat.opacity = 0;
-        if (ctx.checkBlock(target, A.zone)) {
+        const blocked = ctx.checkBlock(target, A.zone);
+        if (blocked && A.charged && this.form > ctx.playerForm()) {
+          ctx.onPierced(target.clone());
+          ctx.hurtPlayer((7 + this.level * 1.5) * this.A.dmg * this.formMul * 0.6, target.clone());
+        } else if (blocked) {
           ctx.onBlocked(target.clone());
           this.recoil.addScaledVector(ctx.bodyFwd, 0.3);
           this.react('head_back', 0.6);
@@ -650,7 +674,11 @@ export class Enemy {
       const L = this.limbs[side], s = L.s;
       const fist = _v1, foot = _v2;
       let snap = false;
-      if (this.powerup > 0) {
+      if (this.remote && this.remote.has) {
+        this.body.worldToLocal(fist.copy(this.remote.hands[side]));
+        this.body.worldToLocal(foot.copy(this.remote.feet[side]));
+        snap = true;
+      } else if (this.powerup > 0) {
         // przemiana: pięści przy biodrach, ciało drży
         fist.set(s * 0.34, -0.02, 0.1); foot.set(s * 0.22, -0.8, 0.02);
       } else if (st === 'embedded' || st === 'down' || st === 'ko') {
@@ -684,7 +712,7 @@ export class Enemy {
         fist.set(s * 0.22, 0.25, 0.12); foot.set(s * 0.12, -0.75, -0.25);
       }
       L.fistT.lerp(fist, snap ? 1 : lerpK);
-      L.footT.lerp(foot, lerpK);
+      L.footT.lerp(foot, snap && this.remote ? 1 : lerpK);
       const S = _v3.set(s * 0.24, 0.5, 0);
       const E = solveIK(S, L.fistT, 0.28, 0.27, _n.set(s * 0.6, -1, -0.5), new THREE.Vector3());
       setLimb(L.upper, S, E); L.elbow.position.copy(E); setLimb(L.fore, E, L.fistT); L.fist.position.copy(L.fistT);
@@ -703,6 +731,7 @@ export class Enemy {
     }
     for (const m of this.mats) m.emissive.setRGB(this.flash, this.flash * 0.9, this.flash * 0.8);
     if (this.rig) for (const m of this.rig.mats) m.emissive.setRGB(this.flash * 0.8, this.flash * 0.7, this.flash * 0.6);
+ if (this.remote) this.auraMat.opacity = Math.min(1, 0.15 + this.remote.aura * 0.6 + this.form * 0.15);
     this.hpSprite.visible = this.root.visible && st !== 'gone' && st !== 'melee';
     this.root.updateMatrixWorld();
     if (this.rig && this.root.visible) this.applyRig();

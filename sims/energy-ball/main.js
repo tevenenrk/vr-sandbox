@@ -17,6 +17,8 @@
 import * as THREE from 'three';
 import { XRHandModelFactory } from 'three/addons/webxr/XRHandModelFactory.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
+import { net, joinRoom, leaveRoom, send } from './net.js';
 import { renderer, scene, rig, camera, state, UP, clamp, rand, makeCanvasTex, glowTex } from './core.js';
 import { sfx, music, HUM_KAME, HUM_SMALL, HUM_GIANT, HUM_AURA, HUM_STRUGGLE } from './audio.js';
 import { meleeSpark, teleportFlash, EnergyBall, Beam, KAME_STYLE, SMALL_STYLE, GIANT_STYLE, RED_STYLE, RED_KAME_STYLE, CLASH_STYLE, Aura, Trail, SpeedLines, boom, hitSpark, fadeBall, updateFx } from './fx.js';
@@ -255,6 +257,7 @@ function levelUp() {
   P.ki = 0;
   const n = P.form + 1;
   EV.level++;
+  send({ t: 'lvl', form: n });
   startCutscene('player', () => transform(n, CS.head));
 }
 function levelDown() {
@@ -271,7 +274,7 @@ function transform(n, head = F.head) {
   const feet = _v1.copy(head); feet.y = heightAt(feet.x, feet.z);
   const near = head.y - feet.y < 3;
   boom(near ? feet : _v2.copy(head).addScaledVector(UP, -1), 1.4 + n * 0.5, { big: true, color: 0xffc040, hot: 0xfff0c0, spark: 0xfff0a0, ground: near });
-  if (near) impact(feet, 1 + n * 0.5, _n);
+  if (near) netImpact(feet, 1 + n * 0.5, _n);
   sfx.transform(n);
   P.flash = 0.8; P.flashColor.setHex(0xffd060);
   pulseAll(1, 500);
@@ -289,6 +292,8 @@ function hurtPlayer(dmg) {
   if (P.hp <= 0) {
     P.hp = P.maxHp;
     P.ki = 0;
+    if (net.connected) send({ t: 'ko' });
+    PK.v.set(0, 0, 0);
     msg('Padłeś! Wracasz na start', 2.5);
     if (enemy.state === 'melee') enemy.leaveMelee(ctx);
     resetRig();
@@ -423,6 +428,7 @@ function updateSingle(st, dt) {
     b.gathering = false;
     const dir = aimAssist(st.aim.clone(), b.group.position);
     projectiles.push({ kind: 'small', ball: b, vel: dir.multiplyScalar(20 + c * 6), charge: c, age: 0, origin: b.group.position.clone(), prev: new THREE.Vector3() });
+    netShot(projectiles[projectiles.length - 1]);
     stats.shots++;
     EV.small++;
     sfx.smallShot();
@@ -467,7 +473,14 @@ function fireKame() {
   if (!b) return;
   if (c < CFG.minKame || !spend(14 + 22 * c)) { fizzleBall(b); enemyReleaseCharge(); return; }
   EV.kame++;
-  if (K.eBall && enemy.state === 'charging') { startStruggle(b, c); return; }
+  if (K.eBall && enemy.state === 'charging') { const eb = K.eBall; K.eBall = null; startStruggle(b, c, eb); return; }
+  if (net.connected && RK.ball && RK.c >= 0 && remoteFacing()) {
+    // drugi gracz właśnie ładuje falę → pojedynek
+    const eb = RK.ball; RK.ball = null;
+    send({ t: 'struggle', o: b.group.position.toArray(), c });
+    startStruggle(b, c, eb, true);
+    return;
+  }
   const L = side('left'), R = side('right');
   const dir = _v1.addVectors(L.aim, R.aim);
   if (dir.lengthSq() < 0.1) dir.copy(F.fwd);
@@ -481,6 +494,7 @@ function fireKame() {
   const beam = new Beam(b.radius * 0.8, origin);
   const p = { kind: 'kame', ball: b, beam, vel: d.multiplyScalar(speed), speed, charge: c, age: 0, origin, prev: new THREE.Vector3() };
   projectiles.push(p);
+  netShot(p);
   beams.push({ beam, proj: p, age: 0 });
   stats.shots++;
   sfx.fire(c);
@@ -489,7 +503,7 @@ function fireKame() {
 
 // --- rywal odpowiada falą: ładuje razem z graczem, wypuszcza razem z nim ---
 function enemyMayMirror() {
-  if (!enemy.canCharge() || state.xrMode === 'ar' || (TR.on && !TR.allowMirror)) return false;
+  if (net.connected || !enemy.canCharge() || state.xrMode === 'ar' || (TR.on && !TR.allowMirror)) return false;
   const d = enemy.chestW.distanceTo(F.head);
   if (d < 6 || d > 70) return false;
   _v1.subVectors(enemy.chestW, F.head).setY(0).normalize();
@@ -526,42 +540,59 @@ function enemyReleaseCharge() {
 }
 
 // --- pojedynek fal ---
-const BS = { active: false, u: 0.5, t: 0, mash: 0, c: 0, extend: 0, pOrigin: new THREE.Vector3(), eOrigin: new THREE.Vector3(), clashPos: new THREE.Vector3(), spark: 0 };
-function startStruggle(pBall, c) {
+// Siła każdej strony = naładowanie fali × poziom mocy × stamina + szybkość klikania.
+// Z komputerem liczy to ta przeglądarka; we dwoje liczy gospodarz i rozsyła wynik.
+const BS = { active: false, u: 0.5, t: 0, mash: 0, c: 0, extend: 0, pOrigin: new THREE.Vector3(), eOrigin: new THREE.Vector3(), clashPos: new THREE.Vector3(), spark: 0, mp: false, rf: 1, sendT: 0, uTarget: 0.5 };
+function beamForce(c, form, sta, mashRate) {
+  return (0.6 + 0.8 * c) * (1 + 0.35 * form) * (0.55 + 0.45 * sta) + mashRate * 0.15;
+}
+function startStruggle(pBall, c, eBall, mp = false) {
   BS.active = true;
-  BS.u = 0.5; BS.t = 0; BS.mash = 0; BS.c = c; BS.extend = 0; BS.spark = 0;
+  BS.mp = mp;
+  BS.u = 0.5; BS.uTarget = 0.5; BS.t = 0; BS.mash = 0; BS.c = c; BS.extend = 0; BS.spark = 0; BS.rf = 1; BS.sendT = 0;
   BS.pOrigin.copy(pBall.group.position);
-  BS.eOrigin.copy(K.eBall.group.position);
-  BS.pBall = pBall; BS.eBall = K.eBall; K.eBall = null;
-  pBall.gathering = false; BS.eBall.gathering = false;
-  pBall.power = 1; BS.eBall.power = 1;
+  BS.eOrigin.copy(eBall.group.position);
+  BS.pBall = pBall; BS.eBall = eBall;
+  pBall.gathering = false; eBall.gathering = false;
+  pBall.power = 1; eBall.power = 1;
   BS.pBeam = new Beam(Math.max(0.08, pBall.radius * 0.85), BS.pOrigin);
-  BS.eBeam = new Beam(Math.max(0.08, BS.eBall.radius * 0.85), BS.eOrigin, 0xffecec, 0xff3a3a);
+  BS.eBeam = new Beam(Math.max(0.08, eBall.radius * 0.85), BS.eOrigin, 0xffecec, 0xff3a3a);
   BS.clash = new EnergyBall(CLASH_STYLE);
   BS.clash.radius = 0.2;
   BS.clash.group.position.lerpVectors(BS.pOrigin, BS.eOrigin, 0.5);
   BS.hum = sfx.hum(HUM_STRUGGLE);
-  enemy.startStruggle();
+  if (!mp) enemy.startStruggle();
   FLY.speed = 0;
   K.mode = 'struggle';
   sfx.fire(1); sfx.fire(1, true);
   pulseAll(1, 300);
-  msg('POJEDYNEK FAL! Klikaj spust jak najszybciej!', 3);
+  msg('POJEDYNEK FAL! Klikaj spust!', 3);
 }
 function updateStruggle(dt) {
   BS.t += dt;
   BS.extend = Math.min(1, BS.extend + dt / 0.35);
-  // każde wciśnięcie spustu dodaje siły
+  // każde wciśnięcie spustu dodaje siły (i trochę kosztuje staminy)
   for (const st of inputs) {
-    if (st.trig && !st.pTrig) { BS.mash += 1; pulse(st, 0.6, 35); P.lastAct = 0; }
+    if (st.trig && !st.pTrig) { BS.mash += 1; pulse(st, 0.6, 35); P.lastAct = 0; P.sta = Math.max(0, P.sta - 0.6); }
   }
   BS.mash *= Math.exp(-dt * 2);
-  const pBase = (0.8 + BS.c * 0.4) * Math.sqrt(dmgMul());
-  const pF = pBase + BS.mash * 0.5;
-  const surge = Math.sin(BS.t * 1.7) * 0.15 + Math.sin(BS.t * 4.3) * 0.1 + (Math.sin(BS.t * 0.6) > 0.85 ? 0.35 : 0);
-  // bez klikania zawsze przegrywasz — rywal jest silniejszy od samej naładowanej fali
-  const eF = Math.max(enemy.beamForce(), pBase * 1.35) * (1 + surge);
-  if (BS.extend >= 1) BS.u = clamp(BS.u + (pF - eF) * 0.14 * dt, 0, 1);
+  const pF = beamForce(BS.c, P.form, P.sta / P.maxSta, BS.mash * 2);
+  let eF;
+  if (BS.mp) {
+    eF = BS.rf;
+    BS.sendT -= dt;
+    if (BS.sendT <= 0) {
+      BS.sendT = 0.1;
+      send({ t: 'sf', f: pF });
+      if (net.role === 'host') send({ t: 'su', u: BS.u });
+    }
+    if (net.role === 'host') { if (BS.extend >= 1) BS.u = clamp(BS.u + (pF - eF) * 0.25 * dt, 0, 1); }
+    else BS.u += (BS.uTarget - BS.u) * (1 - Math.exp(-dt * 10));
+  } else {
+    const surge = Math.sin(BS.t * 1.7) * 0.12 + Math.sin(BS.t * 4.3) * 0.08 + (Math.sin(BS.t * 0.6) > 0.85 ? 0.25 : 0);
+    eF = enemy.beamForce() * (1 + surge);
+    if (BS.extend >= 1) BS.u = clamp(BS.u + (pF - eF) * 0.25 * dt, 0, 1);
+  }
   BS.pF = pF; BS.eF = eF;
   // punkt zderzenia przesuwa się w stronę słabszego
   BS.clashPos.lerpVectors(BS.pOrigin, BS.eOrigin, BS.u);
@@ -581,13 +612,21 @@ function updateStruggle(dt) {
   if (BS.spark <= 0 && BS.extend >= 1) { BS.spark = 0.09; hitSpark(BS.clashPos, 0.5 + Math.random() * 0.4, Math.random() < 0.5 ? 0xd8b0ff : 0xffffff); }
   if (BS.hum) BS.hum.update(clamp(0.4 + Math.abs(pF - eF) * 0.3, 0, 1));
   if (Math.random() < dt * 8) pulseAll(0.25 + Math.min(0.5, BS.mash * 0.05), 30);
-  P.msg = BS.u > 0.5 ? 'Przepychasz! Klikaj dalej!' : 'Rywal napiera! KLIKAJ SPUST!'; P.msgT = 0.3;
-  if (!enemy.hittable) endStruggle('draw');
-  else if (BS.u >= 0.985) endStruggle('win');
-  else if (BS.u <= 0.015) endStruggle('lose');
-  else if (BS.t > 25) endStruggle('draw');
+  P.msg = BS.u > 0.5 ? 'Przepychasz! Klikaj dalej!' : 'Rywal napiera! Klikaj spust!'; P.msgT = 0.3;
+  // rozstrzygnięcie: z komputerem tutaj, we dwoje — gospodarz
+  if (BS.mp && net.role !== 'host') return;
+  let res = null;
+  if (!BS.mp && !enemy.hittable) res = 'draw';
+  else if (BS.u >= 0.985) res = 'win';
+  else if (BS.u <= 0.015) res = 'lose';
+  else if (BS.t > 25) res = 'draw';
+  if (res) {
+    if (BS.mp) send({ t: 'se', r: res === 'win' ? 'lose' : res === 'lose' ? 'win' : 'draw' });
+    endStruggle(res);
+  }
 }
 function endStruggle(result) {
+  if (!BS.active) return;
   BS.active = false;
   EV.struggle++;
   for (const b of [BS.pBeam, BS.eBeam]) b.dispose();
@@ -596,26 +635,24 @@ function endStruggle(result) {
   K.mode = 'wait';
   const away = _v1.subVectors(BS.eOrigin, BS.pOrigin).normalize().clone();
   if (result === 'win') {
-    const pos = enemy.chestW.clone();
+    const pos = BS.mp ? BS.eOrigin.clone() : enemy.chestW.clone();
     boom(pos, 2.2 + BS.c, { big: true, color: 0x3aa8ff });
     sfx.explode(pos, 3);
-    enemy.endStruggle();
-    enemy.hitByBall((40 + 30 * BS.c) * dmgMul(), away, true, ctx);
+    if (!BS.mp) { enemy.endStruggle(); enemy.hitByBall((40 + 30 * BS.c) * dmgMul(), away, true, ctx); }
     stats.hits++;
     msg('WYGRAŁEŚ POJEDYNEK!', 2.5);
   } else if (result === 'lose') {
     const pos = BS.pOrigin.clone().addScaledVector(away, 0.6);
     boom(pos, 1.6, { big: true, color: 0xff3a3a, hot: 0xffd0c0, spark: 0xffb0b0 });
     sfx.explode(pos, 2.5);
-    enemy.endStruggle();
-    hurtPlayer(30 * enemy.A.dmg);
+    if (!BS.mp) enemy.endStruggle();
+    hurtPlayer(BS.mp ? 35 : 30 * enemy.A.dmg);
     rig.position.addScaledVector(away.setY(0).normalize(), -3);
     if (P.hp > 0) msg('Przegrałeś pojedynek!', 2.5);
   } else {
     boom(BS.clashPos.clone(), 2, { big: true, color: 0xc88cff, hot: 0xffffff, spark: 0xe0c0ff });
     sfx.explode(BS.clashPos, 2.5);
-    enemy.endStruggle();
-    if (enemy.hittable) enemy.damage(10);
+    if (!BS.mp) { enemy.endStruggle(); if (enemy.hittable) enemy.damage(10); }
     hurtPlayer(8);
     msg('Remis — fale się zniosły', 2);
   }
@@ -655,7 +692,7 @@ function throwGiant() {
   if (dir.y > 0.2) dir.y = 0.2;
   dir.normalize();
   aimAssist(dir, b.group.position);
-  projectiles.push({ kind: 'giant', ball: b, beam: null, vel: dir.multiplyScalar(8 + P.form * 2), speed: 8, charge: b.power, age: 0, origin: b.group.position.clone(), prev: new THREE.Vector3() });
+  netShot(projectiles[projectiles.push({ kind: 'giant', ball: b, beam: null, vel: dir.multiplyScalar(8 + P.form * 2), speed: 8, charge: b.power, age: 0, origin: b.group.position.clone(), prev: new THREE.Vector3() }) - 1]);
   stats.shots++;
   sfx.fire(1, true);
   pulseAll(1, 400);
@@ -819,7 +856,9 @@ function resolveStrike(cur) {
   const c = cur.c, dm = dmgMul();
   const strong = cur.style === 'power' || cur.style === 'round' || cur.style === 'hammer';
   const hitPos = (cur.zone === 'fold' || (cur.zone === 'straight' && cur.style !== 'jab')) ? enemy.chestW.clone() : enemy.headW.clone();
-  if (cur.style !== 'hammer' && enemy.blocksHit(c)) {
+  const bh = cur.style !== 'hammer' ? enemy.blocksHit(c, P.form) : false;
+  if (bh === 'pierced') msg('Przebiłeś blok!', 1);
+  if (bh === true) {
     sfx.block(hitPos); hitSpark(hitPos, 0.3, 0xffd0a0); msg('Rywal zablokował', 0.8);
     P.hitStop = 0.05;
     pulse(cur.st, 0.3, 40);
@@ -845,7 +884,7 @@ function resolveStrike(cur) {
     launch = d.normalize().multiplyScalar((16 + c * 26) * Math.sqrt(dm) * (cur.style === 'hammer' ? 1.3 : 1));
   }
   const knock = launch ? 0 : tier === 'medium' ? (cur.kind === 'kick' ? 3.2 : 2.6) : 0.35;
-  enemy.hitMelee(dmg, away, launch, ctx, REACT_BY_ZONE[cur.zone] || 'head_back', strong, knock);
+  enemy.hitMelee(bh === 'pierced' ? dmg * 0.8 : dmg, away, launch, ctx, REACT_BY_ZONE[cur.zone] || 'head_back', strong, knock, { zone: cur.zone, charged: c >= 0.7 });
   meleeSpark(hitPos, tier === 'strong' ? 1 : tier === 'medium' ? 0.6 : 0.3, launch ? 0xffe080 : 0xffffff);
   EV.melee++;
   if (launch) EV.strong++;
@@ -861,6 +900,11 @@ function resolveStrike(cur) {
   }
 }
 
+// sygnał, że cios jest naładowany: wibracja i dźwięk przy progu średniego i mocnego ciosu
+function chargeTick(st, a, b) {
+  if (a < 0.35 && b >= 0.35) { pulse(st, 0.3, 40); sfx.tone({ type: 'sine', f0: 660, f1: 660, gain: 0.05, dur: 0.12 }); }
+  if (a < 0.7 && b >= 0.7) { pulse(st, 0.8, 90); sfx.tone({ type: 'triangle', f0: 990, f1: 1320, gain: 0.08, dur: 0.18 }); }
+}
 function updateCombat(dt) {
   const L = side('left'), R = side('right');
   const enemyNear = enemy.hittable && enemy.chestW.distanceTo(F.head) < CFG.reach + 0.6;
@@ -883,7 +927,7 @@ function updateCombat(dt) {
   for (const st of [L, R]) {
     // pięść: spust (ładowanie trwa także w czasie animacji poprzedniego ciosu)
     if (st.trig && !st.pTrig) st.punchC = 0;
-    if (st.trig && st.punchC >= 0) st.punchC = Math.min(1, st.punchC + dt / CFG.punchTime);
+    if (st.trig && st.punchC >= 0) { const pc = st.punchC; st.punchC = Math.min(1, st.punchC + dt / CFG.punchTime); chargeTick(st, pc, st.punchC); }
     if (FLY.want) st.punchC = -1;
     if (!st.trig && st.pTrig) {
       if (HAM.armed) {
@@ -900,7 +944,7 @@ function updateCombat(dt) {
     // kopnięcie: chwyt (tylko w walce wręcz)
     if (P.inMelee && K.mode === 'none') {
       if (st.grp && !st.pGrp) st.kickC = 0;
-      if (st.grp && st.kickC >= 0) st.kickC = Math.min(1, st.kickC + dt / CFG.kickTime);
+      if (st.grp && st.kickC >= 0) { const kc = st.kickC; st.kickC = Math.min(1, st.kickC + dt / CFG.kickTime); chargeTick(st, kc, st.kickC); }
       if (!st.grp && st.pGrp && st.kickC >= 0) { startStrike('kick', st, st.kickC); st.kickC = -1; }
     } else st.kickC = -1;
     st.blocking = st.blk && st.valid;
@@ -1022,11 +1066,12 @@ function detonate(p, pos, surface) {
   let floor = false;
   if (surface) {
     if (surface.wallN) { wallDecal(pos, surface.wallN, crater * 0.9); spawnDebris(pos, crater, surface.wallN); }
-    else { impact(pos, crater, _n); floor = _n.y > 0.6; }
+    else { netImpact(pos, crater, _n); floor = _n.y > 0.6; }
     stats.craters++;
   }
   const red = p.ball.o === RED_STYLE;
   boom(pos, size, { big: true, ground: floor, color: red ? 0xff3a3a : 0x3aa8ff, hot: red ? 0xffd0c0 : 0xd8f4ff, spark: red ? 0xffb0b0 : 0xbff0ff });
+  netBoom(p, pos, size, red, floor);
   if (size > 0.8) P.hitStop = Math.max(P.hitStop, Math.min(0.12, size * 0.03));
   sfx.explode(pos, size);
   pulseAll(Math.min(1, 0.2 + size * 0.15), 80 + size * 60);
@@ -1450,18 +1495,24 @@ document.getElementById('rival-file').addEventListener('change', async (e) => {
   if (await loadRival(buf, file.name)) await idb('readwrite', (st) => { st.put(buf, 'rival'); st.put(file.name, 'rivalName'); });
 });
 document.getElementById('rival-clear').addEventListener('click', async () => {
-  enemy.clearModel();
   await idb('readwrite', (st) => { st.delete('rival'); st.delete('rivalName'); });
-  rivalInfo.textContent = 'Domyślny rywal.';
+  useDefaultRival();
 });
+// domyślna postać (models/fighter.glb): rywal w oryginalnych kolorach, gracz w przebarwionym stroju
+let fighterScene = null;
+function useDefaultRival() {
+  if (fighterScene) { enemy.setModel(cloneSkinned(fighterScene)); rivalInfo.textContent = 'Rywal: domyślna postać.'; }
+  else enemy.clearModel();
+}
 (async () => {
+  try {
+    const gltf = await gltfLoader.loadAsync('models/fighter.glb');
+    fighterScene = gltf.scene;
+    avatar.setModel(cloneSkinned(fighterScene), { hue: 3.6 });
+  } catch (e) { console.warn('Brak modelu postaci', e); }
   const buf = await idb('readonly', (st) => st.get('rival'));
   if (buf) { const name = await idb('readonly', (st) => st.get('rivalName')); loadRival(buf, name || 'zapisany'); return; }
-  // albo plik models/rival.glb obok strony (jeśli go dodasz)
-  try {
-    const res = await fetch('models/rival.glb');
-    if (res.ok) loadRival(await res.arrayBuffer(), 'models/rival.glb');
-  } catch { /* brak pliku — zostaje domyślny rywal */ }
+  useDefaultRival();
 })();
 
 // klawiatura i mysz (podgląd)
@@ -1593,7 +1644,9 @@ function doTeleport() {
   dest.y = Math.max(dest.y, heightAt(dest.x, dest.z) + 1.65);
   if (enemy.state === 'melee') enemy.leaveMelee(ctx);
   FLY.speed = 0;
+  const from = F.head.clone();
   moveHeadTo(dest);
+  send({ t: 'tp', a: from.toArray(), b: F.head.toArray() });
   teleportFlash(_v1.copy(F.head).addScaledVector(UP, -0.5));
   EV.tp++;
 }
@@ -1758,6 +1811,7 @@ const trainPanel = (() => {
   return { mesh, draw };
 })();
 function startTraining() {
+  if (net.connected) { msg('Trening niedostępny w grze we dwoje', 2); return; }
   TR.on = true;
   enterStep(0);
   msg('Tryb treningu', 2);
@@ -1797,6 +1851,220 @@ function trainingSkip() {
 }
 
 // ---------------------------------------------------------------------------
+// Gra we dwoje (kod pokoju). Każdy liczy swoje ciało, ciosy i pociski; trafienia, kratery
+// i wybuchy są przesyłane do drugiej osoby. Rywal na ekranie = drugi gracz.
+// ---------------------------------------------------------------------------
+const RK = { ball: null, c: -1, pos: new THREE.Vector3() };   // fala ładowana przez drugiego gracza
+const remoteShots = new Map();
+let shotId = 1, poseT = 0;
+const SPAWN_GUEST = new THREE.Vector3(0, 0, -90);
+const roomStatus = document.getElementById('room-status');
+
+function remoteFacing() {
+  const d = enemy.chestW.distanceTo(F.head);
+  if (d < 6 || d > 90) return false;
+  _v1.subVectors(enemy.chestW, F.head).setY(0).normalize();
+  return _v1.dot(F.fwdFlat) > 0.3;
+}
+// krater + powiadomienie drugiej osoby
+function netImpact(point, R, out = _n) {
+  impact(point, R, out);
+  send({ t: 'crater', p: point.toArray(), R });
+  return out;
+}
+function netShot(p) {
+  if (!net.connected) return;
+  p.id = shotId++;
+  send({ t: 'shot', id: p.id, k: p.kind, p: p.ball.group.position.toArray(), v: p.vel.toArray(), r: p.ball.radius, c: p.charge });
+}
+function netBoom(p, pos, size, red, floor) {
+  if (!net.connected || !p.id) return;
+  send({ t: 'boom', id: p.id, p: pos.toArray(), s: size, red, g: floor });
+}
+ctx.netHit = (m) => {
+  m.form = P.form;
+  send({ t: 'hit', ...m });
+};
+ctx.playerForm = () => P.form;
+ctx.onPierced = (point) => {
+  sfx.punch(0.8, point);
+  meleeSpark(point, 0.7, 0xff9040);
+  P.flash = 0.5; P.flashColor.setHex(0xff6020);
+  msg('Blok przebity!', 1);
+};
+
+// odrzut / wyrzut gracza po trafieniu przez drugą osobę
+const PK = { v: new THREE.Vector3(), slam: false };
+function launchPlayer(v, slam) {
+  PK.v.copy(v); PK.slam = slam;
+  FLY.speed = 0;
+}
+function updatePlayerKnock(dt) {
+  if (PK.v.lengthSq() < 0.04) { PK.v.set(0, 0, 0); return; }
+  const speed = PK.v.length();
+  rig.position.addScaledVector(PK.v, dt);
+  PK.v.multiplyScalar(Math.pow(PK.slam ? 0.55 : 0.02, dt));
+  if (PK.slam) PK.v.y -= 6 * dt;
+  camera.getWorldPosition(_v1);
+  const g = heightAt(_v1.x, _v1.z);
+  if (_v1.y < g + 0.5) {
+    rig.position.y += g + 0.5 - _v1.y;
+    if (PK.slam && speed > 11) {
+      _v2.set(_v1.x, g, _v1.z);
+      netImpact(_v2, 1.2 + speed * 0.06);
+      boom(_v2, 0.5 + speed * 0.03, { big: true, ground: true, color: 0xff7a30, hot: 0xffe0a0, spark: 0xffd090 });
+      sfx.explode(_v2, 1);
+      hurtPlayer(Math.min(20, speed * 0.3));
+    }
+    PK.v.set(0, 0, 0);
+  }
+}
+
+function onNet(m) {
+  switch (m.t) {
+    case 'hello':
+      if (TR.on) stopTraining();
+      cancelKi(); K.mode = 'wait';
+      for (const s of eShots) fadeBall(s.ball);
+      eShots.length = 0;
+      enemy.setRemote(true);
+      P.hp = P.maxHp; P.sta = P.maxSta;
+      if (net.role === 'guest') {
+        START.set(SPAWN_GUEST.x, heightAt(SPAWN_GUEST.x, SPAWN_GUEST.z), SPAWN_GUEST.z);
+        resetRig();
+        rig.rotation.set(0, Math.PI, 0);
+      } else { START.set(0, heightAt(0, 0), 0); resetRig(); }
+      msg('Połączono! Walka 1 na 1', 3);
+      sfx.ding();
+      break;
+    case 'bye':
+      enemy.setRemote(false);
+      if (BS.active && BS.mp) endStruggle('draw');
+      if (RK.ball) { fadeBall(RK.ball); RK.ball = null; }
+      for (const [, r] of remoteShots) { fadeBall(r.ball); if (r.beam) r.beam.dispose(); }
+      remoteShots.clear();
+      START.set(0, heightAt(0, 0), 0);
+      msg('Koniec gry we dwoje', 2);
+      break;
+    case 'pose':
+      enemy.applyRemote(m);
+      RK.c = m.kc;
+      if (m.kc >= 0 && m.kp && !BS.active) {
+        if (!RK.ball) { RK.ball = new EnergyBall(RED_KAME_STYLE); RK.ball.radius = 0.03; }
+        RK.pos.fromArray(m.kp);
+        RK.ball.radius = kameRadius(Math.max(0.05, m.kc));
+        RK.ball.power = m.kc;
+      } else if (RK.ball && !BS.active) { fadeBall(RK.ball); RK.ball = null; }
+      break;
+    case 'shot': {
+      const style = m.k === 'giant' ? GIANT_STYLE : m.k === 'kame' ? RED_KAME_STYLE : RED_STYLE;
+      const b = new EnergyBall(style);
+      b.radius = m.r; b.power = m.c; b.gathering = false;
+      b.group.position.fromArray(m.p);
+      const r = { ball: b, vel: new THREE.Vector3().fromArray(m.v), age: 0, beam: null };
+      if (m.k === 'kame') r.beam = new Beam(m.r * 0.8, b.group.position, 0xffecec, 0xff3a3a);
+      remoteShots.set(m.id, r);
+      sfx.fire(m.c, m.k === 'giant');
+      break;
+    }
+    case 'boom': {
+      const r = remoteShots.get(m.id);
+      if (r) { fadeBall(r.ball); if (r.beam) r.beam.dispose(); remoteShots.delete(m.id); }
+      const pos = new THREE.Vector3().fromArray(m.p);
+      boom(pos, m.s, { big: true, ground: m.g, color: 0xff3a3a, hot: 0xffd0c0, spark: 0xffb0b0 });
+      sfx.explode(pos, m.s);
+      break;
+    }
+    case 'crater': impact(new THREE.Vector3().fromArray(m.p), m.R, _n); break;
+    case 'hit': onNetHit(m); break;
+    case 'blocked':
+      sfx.block(enemy.chestW); meleeSpark(enemy.chestW, 0.4, 0xbfe8ff);
+      enemy.guardT = 0.4;
+      msg('Zablokował!', 0.8);
+      break;
+    case 'ko': stats.kos++; P.slowmo = 1; msg('NOKAUT!', 2.5); break;
+    case 'lvl':
+      startCutscene('enemy', () => {
+        boom(enemy.pos.clone(), 1.6, { big: true, color: 0xff2a4a, hot: 0xffd0d0, spark: 0xffb0c0 });
+        sfx.transform(m.form);
+        msg(`Rywal: poziom ${m.form}!`, 3);
+      });
+      break;
+    case 'tp':
+      teleportFlash(new THREE.Vector3().fromArray(m.a));
+      teleportFlash(new THREE.Vector3().fromArray(m.b));
+      sfx.teleport();
+      break;
+    case 'struggle':
+      // drugi gracz wypuścił falę, gdy ja ładuję → pojedynek
+      if (K.mode === 'kame' && K.kame) {
+        const b = K.kame, c = K.kameC;
+        K.kame = null; K.hum = stopHum(K.hum);
+        const eb = RK.ball || new EnergyBall(RED_KAME_STYLE);
+        RK.ball = null;
+        eb.group.position.fromArray(m.o);
+        eb.radius = Math.max(eb.radius, 0.08);
+        startStruggle(b, c, eb, true);
+      }
+      break;
+    case 'sf': BS.rf = m.f; break;
+    case 'su': BS.uTarget = 1 - m.u; break;
+    case 'se': endStruggle(m.r); break;
+  }
+}
+function onNetHit(m) {
+  const dmg = m.dmg;
+  const dir = new THREE.Vector3().fromArray(m.dir || [0, 0, 1]);
+  // blok: chroni ćwiartkę, chyba że naładowany cios kogoś z wyższego poziomu
+  const zone = m.ball ? null : ({ over: 'high', upper: 'low', hookL: 'right', hookR: 'left', straight: 'high', fold: 'low' })[m.zone] || 'high';
+  if (zone && inputs.some(st => st.blocking && st.blockZone === zone)) {
+    if (m.charged && m.form > P.form) {
+      ctx.onPierced(F.head);
+      hurtPlayer(dmg * 0.6);
+    } else {
+      send({ t: 'blocked' });
+      sfx.block(F.head); blockFlash = 1; EV.block++;
+      msg('Blok!', 0.8);
+      return;
+    }
+  } else hurtPlayer(dmg);
+  if (m.launch) launchPlayer(new THREE.Vector3().fromArray(m.launch), true);
+  else if (m.knock) launchPlayer(dir.setY(0).normalize().multiplyScalar(m.knock * 4), false);
+  else if (m.strong) launchPlayer(dir.multiplyScalar(18), true);
+  P.hitStop = 0.08;
+}
+function sendPose(dt) {
+  poseT -= dt;
+  if (poseT > 0) return;
+  poseT = 0.05;
+  const r2 = (v) => [Math.round(v.x * 100) / 100, Math.round(v.y * 100) / 100, Math.round(v.z * 100) / 100];
+  send({
+    t: 'pose', h: r2(F.head), f: [F.fwdFlat.x, F.fwdFlat.z],
+    lh: r2(handsForAvatar.left.fistPos), rh: r2(handsForAvatar.right.fistPos),
+    lf: r2(avatar.footPos.left), rf: r2(avatar.footPos.right),
+    v: r2(PK.v), st: PK.v.length() > 6 ? 'launched' : 'fly', au: aura.level,
+    hp: Math.max(0, P.hp), mhp: P.maxHp, fm: P.form,
+    kc: K.mode === 'kame' && K.kame ? K.kameC : -1, kp: K.kame ? r2(K.kame.group.position) : null,
+  });
+}
+function updateRemote(dt, t) {
+  if (RK.ball && !BS.active) { RK.ball.group.position.lerp(RK.pos, 1 - Math.exp(-dt * 20)); RK.ball.update(dt, t); }
+  for (const [id, r] of remoteShots) {
+    r.age += dt;
+    r.ball.group.position.addScaledVector(r.vel, dt);
+    r.ball.update(dt, t);
+    if (r.beam) { r.beam.head.copy(r.ball.group.position); r.beam.update(t); }
+    if (r.age > 15) { fadeBall(r.ball); if (r.beam) r.beam.dispose(); remoteShots.delete(id); }
+  }
+}
+document.getElementById('room-join').addEventListener('click', () => {
+  startAudio();
+  const code = document.getElementById('room-code').value;
+  joinRoom(code, (t) => { roomStatus.textContent = t; msg(t, 2); }, onNet);
+});
+document.getElementById('room-leave').addEventListener('click', () => { leaveRoom(); roomStatus.textContent = 'Rozłączono.'; });
+
+// ---------------------------------------------------------------------------
 // Pętla główna
 // ---------------------------------------------------------------------------
 const handsForAvatar = {
@@ -1815,6 +2083,7 @@ for (const s of ['left', 'right']) {
   shields[s] = m;
 }
 const legGuard = { left: false, right: false };
+const kickCharge = { left: 0, right: 0 };
 
 // klatka w czasie przerywnika: rozgrywka zatrzymana, tylko przemiana i kamera
 function cutsceneFrame(realDt) {
@@ -1871,6 +2140,7 @@ function frame() {
   computeHands();
   ctx.right.copy(F.right);
 
+  if (net.connected) P.inMelee = enemy.hittable && enemy.chestW.distanceTo(F.head) < 3;
   updateTeleport(realDt);
   updateKi(dt);
   updateCombat(dt);
@@ -1896,6 +2166,9 @@ function frame() {
   if (P.exhausted && P.sta > 30) P.exhausted = false;
 
   enemy.update(dt, t, ctx);
+  updatePlayerKnock(dt);
+  updateRemote(dt, t);
+  if (net.connected) sendPose(realDt);
   if (K.kame) K.kame.update(dt, t);
   if (K.giant) K.giant.update(dt, t);
   for (const st of inputs) if (st.ball) st.ball.update(dt, t);
@@ -1923,12 +2196,13 @@ function frame() {
       strikeFist(cur, h.fistPos, st.pos);
       if (cur.both) h.fistPos.addScaledVector(F.right, s === 'left' ? -0.06 : 0.06);
     }
-    h.charge = Math.max(st.punchC, st.kickC, 0);
+    h.charge = Math.max(st.punchC, 0);
+    kickCharge[s] = Math.max(st.kickC, 0);
     h.blockZone = st.blocking && !(cur && (cur.side === s || cur.both)) ? st.blockZone : null;
     legGuard[s] = h.blockZone === 'low';
     kickForAvatar[s] = st.kick;
   }
-  avatar.update({ dt: realDt, head: F.head, headFwdFlat: F.fwdFlat, hands: handsForAvatar, flyDir: FLY.dir, flySpeed: FLY.speed, kick: kickForAvatar, glow: aura.level, glowColor: GOLD, legGuard });
+  avatar.update({ dt: realDt, t: clock.elapsedTime, head: F.head, headFwdFlat: F.fwdFlat, hands: handsForAvatar, flyDir: FLY.dir, flySpeed: FLY.speed, kick: kickForAvatar, kickCharge, glow: aura.level, glowColor: GOLD, legGuard });
   // tarcza w ćwiartce bloku
   blockFlash = Math.max(0, blockFlash - realDt * 3);
   for (const s of ['left', 'right']) {
@@ -1971,4 +2245,4 @@ function frame() {
 renderer.setAnimationLoop(frame);
 
 // do testów w konsoli
-window.__sim = { TP, CS, TR, EV, STEPS, startTraining, BS, music, P, K, F, FLY, HAM, SK, enemy, inputs, stats, aura, avatar, rig, keys, desk, applyDesktopCamera, projectiles, eShots, heightAt, ctx, addKi, levelUp, boom, impact };
+window.__sim = { net, onNet, RK, PK, remoteShots, TP, CS, TR, EV, STEPS, startTraining, BS, music, P, K, F, FLY, HAM, SK, enemy, inputs, stats, aura, avatar, rig, keys, desk, applyDesktopCamera, projectiles, eShots, heightAt, ctx, addKi, levelUp, boom, impact };

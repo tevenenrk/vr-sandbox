@@ -33,7 +33,7 @@ Symulatory WebXR do testowania na Meta Quest 3 / 3S. Wszystko działa w przeglą
 | Prawa gałka w bok / B | obrót o 30° / powrót na start |
 | Klik lewej gałki / klik prawej gałki | agresja rywala (Bierny → Łatwy → Normalny → Trudny) / muzyka wł./wył. |
 
-**Pojedynek fal:** gdy ładujesz falę i patrzysz na rywala, on też ładuje swoją. Kiedy puścisz — fale zderzają się w jednym punkcie. Klikaj spust jak najszybciej: punkt przesuwa się w stronę słabszego, a kto przegra, obrywa wielkim wybuchem.
+**Pojedynek fal:** gdy ładujesz falę i patrzysz na rywala, on też ładuje swoją. Kiedy puścisz — fale zderzają się w jednym punkcie, który przesuwa się w stronę słabszego. O sile decyduje naładowanie fali, poziom mocy, stamina i to, jak szybko klikasz spust (każde kliknięcie kosztuje odrobinę staminy). Kto przegra, obrywa wielkim wybuchem.
 
 **Teleport**
 
@@ -57,9 +57,17 @@ Zmiana poziomu (twoja albo rywala, który przechodzi na wyższą formę przy mni
 | X / A (trzymaj) | blok — ręka przechodzi w gardę i chroni ćwiartkę ciała, w której jest: nad głową, z lewej, z prawej albo nisko (wtedy też unosisz kolano); odbija też jego pociski |
 | Oba spusty z rękami w górze, puść ruchem w dół | młot — wbija go w ziemię |
 
-Ciosy są animowane: kolejny wychodzi dopiero po skończeniu poprzedniego i gdy rywal wróci do zwarcia (jedno wciśnięcie zostaje zapamiętane). Słaby cios tylko go zachwieje, średni odrzuci na kilka metrów, mocny wyrzuci. Przy trafieniu gra na chwilę zamiera, a rywal reaguje zależnie od kierunku ciosu. Mocny cios wyrzuca go z walki — leci, wbija się w ściany i słupy albo robi krater.
+Ładowany cios świeci na pięści (albo stopie): biało → żółto (średni) → pulsujący pomarańczowy (mocny), z wibracją przy każdym progu. Naładowany mocny cios kogoś z wyższego poziomu przebija blok. Ciosy są animowane: kolejny wychodzi dopiero po skończeniu poprzedniego i gdy rywal wróci do zwarcia (jedno wciśnięcie zostaje zapamiętane). Słaby cios tylko go zachwieje, średni odrzuci na kilka metrów, mocny wyrzuci. Przy trafieniu gra na chwilę zamiera, a rywal reaguje zależnie od kierunku ciosu. Mocny cios wyrzuca go z walki — leci, wbija się w ściany i słupy albo robi krater.
 
 Na samych dłoniach (bez kontrolerów): pięść = chwyt, szczypnięcie = spust.
+
+## Gra we dwoje
+
+Na stronie symulatora wpiszcie na obu goglach ten sam **kod pokoju**, kliknijcie „Połącz”, a potem „Wejdź w VR”. Pierwsza osoba zostaje gospodarzem, druga dołącza (startuje 90 m dalej, twarzą do pierwszej). Połączenie idzie bezpośrednio między przeglądarkami (WebRTC przez darmowy serwer pośredniczący PeerJS), więc oba urządzenia muszą mieć internet. Działa na każdych goglach z przeglądarką WebXR (Quest, Pico, PC VR). Rywal na ekranie to wtedy druga osoba: ciosy, kule, fale, pojedynek fal, teleporty, przemiany i kratery są wspólne.
+
+## Postać
+
+Domyślna postać (`sims/energy-ball/models/fighter.glb`) to rywal w oryginalnych kolorach, a twoje ręce i ciało są z tego samego modelu w przebarwionym stroju.
 
 ## Własny model rywala
 

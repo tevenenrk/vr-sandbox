@@ -99,3 +99,30 @@ export function makeCanvasTex(w, h) {
   tex.colorSpace = THREE.SRGBColorSpace;
   return { canvas, ctx: canvas.getContext('2d'), tex };
 }
+
+// --- sterowanie kośćmi modelu (szkielet Mixamo) -----------------------------------
+const _bq1 = new THREE.Quaternion(), _bwq = new THREE.Quaternion(), _bpq = new THREE.Quaternion();
+const _bP = new THREE.Vector3(), _bC = new THREE.Vector3(), _bT = new THREE.Vector3();
+const _bS = new THREE.Vector3(), _bB = new THREE.Vector3(), _bE = new THREE.Vector3(), _bX = new THREE.Vector3();
+// obróć kość tak, by jej dziecko (childPos) wskazywało na target — niezależnie od osi kości w modelu
+export function aimBone(bone, childPos, target) {
+  bone.getWorldPosition(_bP);
+  _bC.subVectors(childPos, _bP).normalize();
+  _bT.subVectors(target, _bP).normalize();
+  if (_bC.lengthSq() < 1e-8 || _bT.lengthSq() < 1e-8) return;
+  _bq1.setFromUnitVectors(_bC, _bT);
+  bone.getWorldQuaternion(_bwq);
+  _bwq.premultiply(_bq1);
+  bone.parent.getWorldQuaternion(_bpq);
+  bone.quaternion.copy(_bpq.invert().multiply(_bwq));
+  bone.updateMatrixWorld(true);
+}
+// IK dwóch kości (ramię: Arm→ForeArm→Hand, noga: UpLeg→Leg→Foot)
+export function twoBone(a, b, c, target, pole) {
+  a.getWorldPosition(_bS); b.getWorldPosition(_bB); c.getWorldPosition(_bX);
+  const L1 = _bS.distanceTo(_bB), L2 = _bB.distanceTo(_bX);
+  solveIK(_bS, target, L1, L2, pole, _bE);
+  aimBone(a, _bB, _bE);
+  b.getWorldPosition(_bB); c.getWorldPosition(_bS);
+  aimBone(b, _bS, target);
+}
