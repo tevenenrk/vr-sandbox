@@ -56,6 +56,27 @@ export class Avatar {
     this.neck = new THREE.Vector3();
     this.hips = new THREE.Vector3();
     this.footPos = { left: new THREE.Vector3(), right: new THREE.Vector3() };
+    this.guardK = { left: 0, right: 0 };
+    this.legGuardK = { left: 0, right: 0 };
+    this.guardPos = new THREE.Vector3();
+
+    // głowa — widoczna tylko w ujęciach z trzeciej osoby (własna postać: krótkie włosy, czerwona opaska)
+    this.headG = new THREE.Group();
+    const headM = new THREE.Mesh(new THREE.SphereGeometry(0.11, 20, 14), this.skin);
+    headM.scale.set(0.95, 1.1, 1);
+    const hairMat = new THREE.MeshLambertMaterial({ color: 0x2a1c14 });
+    const hair = new THREE.Mesh(new THREE.SphereGeometry(0.118, 20, 10, 0, Math.PI * 2, 0, Math.PI * 0.5), hairMat);
+    hair.position.y = 0.015; hair.scale.set(1, 1.05, 1.06);
+    const bandMat = new THREE.MeshLambertMaterial({ color: 0xc8202a });
+    const band = new THREE.Mesh(new THREE.TorusGeometry(0.112, 0.014, 6, 24), bandMat);
+    band.rotation.x = Math.PI / 2; band.position.y = 0.03;
+    const tail1 = new THREE.Mesh(new THREE.BoxGeometry(0.025, 0.12, 0.008), bandMat); tail1.position.set(0.02, -0.03, -0.12); tail1.rotation.z = 0.3;
+    const tail2 = tail1.clone(); tail2.position.x = -0.02; tail2.rotation.z = -0.25;
+    const eyeMat = new THREE.MeshBasicMaterial({ color: 0x101010 });
+    for (const sx of [-1, 1]) { const e = new THREE.Mesh(new THREE.SphereGeometry(0.012, 6, 4), eyeMat); e.position.set(sx * 0.038, 0.0, -0.1); this.headG.add(e); }
+    this.headG.add(headM, hair, band, tail1, tail2);
+    this.headG.visible = false;
+    this.group.add(this.headG);
   }
 
   // P: { head, headFwdFlat, hands: {left, right}, flyDir, kick: {left:{t,target}, right}, glow, glowColor, dt }
@@ -84,6 +105,17 @@ export class Avatar {
       for (const k of ['upper', 'elbow', 'fore', 'band', 'fist']) a[k].visible = !!vis;
       if (!vis) continue;
       a.fist.visible = !h.isHand;
+      // garda przy bloku: ręka przechodzi w charakterystyczną pozycję dla chronionej ćwiartki
+      this.guardK[side] += ((h.blockZone ? 1 : 0) - this.guardK[side]) * (1 - Math.exp(-dt * 16));
+      if (this.guardK[side] > 0.01) {
+        const z = h.blockZone || h.lastZone;
+        const G = this.guardPos.copy(P.head);
+        if (z === 'high') G.addScaledVector(UP, 0.1).addScaledVector(fwd, 0.3).addScaledVector(_right, 0.07 * sgn);
+        else if (z === 'low') G.addScaledVector(UP, -0.55).addScaledVector(fwd, 0.33).addScaledVector(_right, 0.08 * sgn);
+        else G.addScaledVector(_right, z === 'left' ? -0.25 : 0.25).addScaledVector(fwd, 0.22).addScaledVector(UP, -0.08);
+        h.fistPos.lerp(G, this.guardK[side]);
+        if (h.blockZone) h.lastZone = h.blockZone;
+      }
       a.fist.position.copy(h.fistPos);
       a.fist.quaternion.copy(h.quat);
       // nadgarstek: za pięścią (w stronę łokcia)
@@ -114,6 +146,9 @@ export class Avatar {
       } else {
         foot.copy(H).addScaledVector(UP, -0.85).addScaledVector(fwd, 0.06).addScaledVector(_right, 0.04 * sgn);
       }
+      // blok dołem: kolano w górę
+      this.legGuardK[side] += ((P.legGuard && P.legGuard[side] ? 1 : 0) - this.legGuardK[side]) * (1 - Math.exp(-dt * 14));
+      if (this.legGuardK[side] > 0.01) foot.lerp(_b.copy(H).addScaledVector(fwd, 0.3).addScaledVector(UP, -0.35), this.legGuardK[side]);
       if (k && k.t >= 0) {
         // kopnięcie: podciągnięcie kolana (okrężne — z boku), wyprost do celu, chwila, powrót
         const p = k.t / k.dur, h = k.hit / k.dur, hold = h + 0.12;
@@ -149,6 +184,11 @@ export class Avatar {
 
     // świecenie przy aurze / formach
     for (const m of this.mats) m.emissive.copy(P.glowColor).multiplyScalar(P.glow * 0.35);
+    this.headG.visible = !!P.showHead;
+    if (P.showHead) {
+      this.headG.position.copy(P.head).addScaledVector(UP, -0.02);
+      this.headG.quaternion.setFromUnitVectors(_c.set(0, 0, -1), fwd);
+    }
   }
 }
 void _q;

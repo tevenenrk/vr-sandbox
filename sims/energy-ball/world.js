@@ -5,8 +5,9 @@ import { scene, state, smooth, makeCanvasTex } from './core.js';
 const _v1 = new THREE.Vector3();
 
 export const FOG_COLOR = new THREE.Color(0xd9b48c);
-export const FOG_DENSITY = 0.006;
-export const ARENA_RADIUS = 112;
+export const FOG_DENSITY = 0.0022;
+export const SCALE = 3;               // kanion 3× większy (szerokość i wysokość)
+export const ARENA_RADIUS = 112 * SCALE;
 
 // ---------------------------------------------------------------------------
 // Układ kanionu: otwarta niecka + kręte wąwozy (część wąskich = "zamknięte")
@@ -28,8 +29,9 @@ function distToSeg(px, pz, ax, az, bx, bz) {
   const t = Math.max(0, Math.min(1, ((px - ax) * dx + (pz - az) * dz) / (dx * dx + dz * dz)));
   return Math.hypot(px - (ax + dx * t), pz - (az + dz * t));
 }
-// ujemne = wewnątrz otwartej przestrzeni, dodatnie = odległość od krawędzi w głąb skały
-function openness(x, z) {
+// ujemne = wewnątrz otwartej przestrzeni, dodatnie = odległość od krawędzi w głąb skały (w metrach)
+function openness(x, z) { return SCALE * opennessUnit(x / SCALE, z / SCALE); }
+function opennessUnit(x, z) {
   let d = Math.hypot(x - BASIN.x, z - BASIN.z) - BASIN.r;
   for (const c of CHANNELS) {
     for (let i = 0; i < c.pts.length - 1; i++) {
@@ -39,23 +41,24 @@ function openness(x, z) {
   }
   return d;
 }
-function baseHeight(x, z) {
+function baseHeight(wx, wz) {
+  const x = wx / SCALE, z = wz / SCALE; // układ "jednostkowy", wynik skalowany
   const jag = Math.sin(x * 0.21 + z * 0.07) * 1.6 + Math.sin(z * 0.33 - x * 0.12) * 1.1 + Math.sin((x - z) * 0.6) * 0.4;
-  const d = openness(x, z) + jag;
-  const floor = (Math.sin(x * 0.09 + Math.sin(z * 0.06) * 2) * 0.5 + Math.sin(z * 0.13 + x * 0.04) * 0.35) * smooth(-6, 0, d)
-    + Math.sin(x * 0.7) * Math.sin(z * 0.6) * 0.05;
+  const d = opennessUnit(x, z) + jag;
+  const floor = (Math.sin(x * 0.09 + Math.sin(z * 0.06) * 2) * 0.5 + Math.sin(z * 0.13 + x * 0.04) * 0.35) * smooth(-6, 0, d) * 1.8
+    + Math.sin(wx * 0.7) * Math.sin(wz * 0.6) * 0.05;
   // ściana z uskokami (warstwy skalne)
   const wallT = smooth(0, 8, d);
   const terraces = Math.floor(wallT * 4) / 4 * 0.25 + wallT * 0.75;
   const plateau = WALL_H + Math.sin(x * 0.05) * 3 + Math.sin(z * 0.07 + 1) * 2.5;
-  let h = floor + terraces * plateau;
+  let h = floor + terraces * plateau * SCALE;
   const r = Math.hypot(x, z);
-  h = Math.max(h, smooth(104, 118, r) * plateau);
+  h = Math.max(h, smooth(104, 118, r) * plateau * SCALE);
   return h;
 }
 
 // ---------------------------------------------------------------------------
-export const TER = { size: 240, segs: 220 };
+export const TER = { size: 240 * SCALE, segs: 360 };
 TER.n = TER.segs + 1;
 TER.step = TER.size / TER.segs;
 TER.half = TER.size / 2;
@@ -79,9 +82,9 @@ terrainGeo.rotateX(-Math.PI / 2);
       pos.setY(i, h);
       c.copy(sand).lerp(sandDark, 0.5 + 0.5 * Math.sin(x * 0.3 + Math.sin(z * 0.2) * 3));
       if (h > 1.2) {
-        const band = bands[Math.floor(Math.abs(h * 0.55 + Math.sin(x * 0.05) * 1.5)) % bands.length];
-        c.lerp(band, smooth(1.2, 4, h));
-        if (h > WALL_H - 3) c.lerp(sandDark, 0.45); // piasek na płaskowyżu
+        const band = bands[Math.floor(Math.abs(h * 0.2 + Math.sin(x * 0.02) * 1.5)) % bands.length];
+        c.lerp(band, smooth(1.2, 6, h));
+        if (h > WALL_H * SCALE - 8) c.lerp(sandDark, 0.45); // piasek na płaskowyżu
       }
       col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b;
     }
@@ -293,9 +296,55 @@ export function impact(point, R, outNormal = new THREE.Vector3()) {
   normalAt(point.x, point.z, outNormal);
   if (state.xrMode === 'ar') return outNormal;
   if (outNormal.y > 0.6) makeCrater(point.x, point.z, R);
-  else wallDecal(point, outNormal, R * 0.9);
+  else wallBite(point, R, outNormal);
   spawnDebris(point, R, outNormal);
   return outNormal;
+}
+
+// trafienie w ścianę/pagórek: wyrwa w skale + osypisko głazów z góry
+export function wallBite(point, R, normal) {
+  if (state.xrMode === 'ar') return;
+  const ext = R * 1.4;
+  const ix0 = Math.floor((point.x - ext + TER.half) / TER.step), ix1 = Math.ceil((point.x + ext + TER.half) / TER.step);
+  const iz0 = Math.floor((point.z - ext + TER.half) / TER.step), iz1 = Math.ceil((point.z + ext + TER.half) / TER.step);
+  const pos = terrainGeo.attributes.position, col = terrainGeo.attributes.color;
+  const c = new THREE.Color();
+  let topH = point.y;
+  for (let iz = Math.max(0, iz0); iz <= Math.min(TER.segs, iz1); iz++) {
+    for (let ix = Math.max(0, ix0); ix <= Math.min(TER.segs, ix1); ix++) {
+      const i = iz * TER.n + ix;
+      const x = ix * TER.step - TER.half, z = iz * TER.step - TER.half;
+      const d = Math.hypot(x - point.x, z - point.z) / R;
+      if (d > 1.4) continue;
+      const target = point.y - R * 0.35 * Math.max(0, 1 - d * d) + Math.max(0, d - 0.5) * R * 4;
+      if (TER.h[i] > target) {
+        topH = Math.max(topH, TER.h[i]);
+        TER.h[i] = Math.max(-25, target);
+        pos.setY(i, TER.h[i]);
+        c.setRGB(col.getX(i), col.getY(i), col.getZ(i)).lerp(SCORCH, (1 - d / 1.4) * 0.6);
+        col.setXYZ(i, c.r, c.g, c.b);
+      }
+    }
+  }
+  pos.needsUpdate = true;
+  col.needsUpdate = true;
+  updateNormals(ix0 - 1, iz0 - 1, ix1 + 1, iz1 + 1);
+  for (const r of decoRocks) {
+    if (Math.hypot(r.position.x - point.x, r.position.z - point.z) < ext) r.position.y = heightAt(r.position.x, r.position.z) + r.userData.lift;
+  }
+  // głazy osypujące się z wyrwy
+  const n = Math.min(35, Math.round(6 + R * 1.6));
+  const span = Math.max(1, topH - point.y);
+  for (let k = 0; k < n; k++) {
+    const m = new THREE.Mesh(debrisGeo, k % 4 === 0 ? hotMat : debrisMat);
+    const s = (0.3 + Math.random() * 0.9) * Math.min(3, 0.4 + R * 0.12);
+    m.scale.set(s, s * (0.6 + Math.random() * 0.5), s);
+    m.position.set(point.x + (Math.random() - 0.5) * R, point.y + Math.random() * Math.min(span, R * 3), point.z + (Math.random() - 0.5) * R)
+      .addScaledVector(normal, -R * 0.2);
+    const vel = new THREE.Vector3((Math.random() - 0.5) * 3, Math.random() * 2, (Math.random() - 0.5) * 3).addScaledVector(normal, 2 + Math.random() * 5);
+    scene.add(m);
+    debris.push({ m, vel, s, life: 9 + Math.random() * 4, resting: false, spin: Math.random() * 4, hot: k % 4 === 0 ? 3 : 0 });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -329,14 +378,14 @@ const decoRocks = [];
         gl_FragColor = vec4(col, 1.0);
       }`,
   });
-  const sky = new THREE.Mesh(new THREE.SphereGeometry(600, 32, 16), skyMat);
+  const sky = new THREE.Mesh(new THREE.SphereGeometry(1800, 32, 16), skyMat);
   sky.renderOrder = -10;
   sky.frustumCulled = false;
   env.add(sky);
 
   env.add(new THREE.Mesh(terrainGeo, new THREE.MeshLambertMaterial({ vertexColors: true })));
-  const outer = new THREE.Mesh(new THREE.RingGeometry(TER.half - 2, 560, 64, 1).rotateX(-Math.PI / 2), new THREE.MeshLambertMaterial({ color: 0xc89a66 }));
-  outer.position.y = WALL_H - 1;
+  const outer = new THREE.Mesh(new THREE.RingGeometry(TER.half - 4, 1700, 64, 1).rotateX(-Math.PI / 2), new THREE.MeshLambertMaterial({ color: 0xc89a66 }));
+  outer.position.y = WALL_H * SCALE - 3;
   env.add(outer);
 
   const pad = new THREE.Mesh(new THREE.RingGeometry(0.55, 0.6, 64).rotateX(-Math.PI / 2),
@@ -347,7 +396,8 @@ const decoRocks = [];
   // skalne słupy w niecce i wąwozach
   const pMat = new THREE.MeshLambertMaterial({ color: 0xb2643c, flatShading: true });
   const pTop = new THREE.MeshLambertMaterial({ color: 0xc98a5a, flatShading: true });
-  for (const [x, z, r, h] of [[14, -24, 2.6, 13], [-16, -2, 2.2, 10], [6, 8, 1.6, 7], [-2, -60, 3, 16], [-58, 30, 2.5, 12], [70, 8, 2, 10]]) {
+  for (let [x, z, r, h] of [[14, -24, 2.6, 13], [-16, -2, 2.2, 10], [6, 8, 1.6, 7], [-2, -60, 3, 16], [-58, 30, 2.5, 12], [70, 8, 2, 10], [24, 4, 1.8, 9], [-8, -30, 2, 11]]) {
+    x *= SCALE; z *= SCALE; r *= 2.5; h *= SCALE;
     const base = heightAt(x, z) - 1;
     const body = new THREE.Mesh(new THREE.CylinderGeometry(r * 0.8, r * 1.15, h, 9, 3), pMat);
     body.position.set(x, base + h / 2, z);
@@ -359,10 +409,10 @@ const decoRocks = [];
   }
   const rockMat = new THREE.MeshLambertMaterial({ color: 0x9c6a48, flatShading: true });
   let placed = 0;
-  for (let i = 0; i < 300 && placed < 45; i++) {
-    const x = (Math.random() - 0.5) * 200, z = (Math.random() - 0.5) * 200;
+  for (let i = 0; i < 900 && placed < 130; i++) {
+    const x = (Math.random() - 0.5) * 600, z = (Math.random() - 0.5) * 600;
     if (openness(x, z) > -2 || Math.hypot(x, z) < 6) continue;
-    const s = 0.3 + Math.random() * 1.3;
+    const s = 0.4 + Math.random() * 2.2;
     const rock = new THREE.Mesh(debrisGeo, rockMat);
     rock.position.set(x, heightAt(x, z) + s * 0.3, z);
     rock.scale.set(s * (0.7 + Math.random()), s * (0.5 + Math.random()), s * (0.7 + Math.random()));

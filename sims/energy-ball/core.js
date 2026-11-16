@@ -12,7 +12,7 @@ document.body.appendChild(renderer.domElement);
 export const scene = new THREE.Scene();
 export const rig = new THREE.Group();
 scene.add(rig);
-export const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.02, 1500);
+export const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.02, 4000);
 rig.add(camera);
 
 export const state = { xrMode: null };

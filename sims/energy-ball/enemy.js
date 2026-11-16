@@ -47,6 +47,13 @@ export const AGGR = [
   { name: 'Normalny', blast: [4, 6.5], rush: [14, 22], atk: [1.1, 2.0], tele: 0.7, combo: 0.22, block: 0.2, dmg: 1, beam: 2.4, engageCD: 6 },
   { name: 'Trudny', blast: [2.4, 4], rush: [8, 13], atk: [0.55, 1.1], tele: 0.5, combo: 0.45, block: 0.3, dmg: 1.4, beam: 3.1, engageCD: 4 },
 ];
+// profile treningowe: manekin (podlatuje, nie atakuje) i powolny napastnik (do nauki bloków)
+export const TRAIN = {
+  dummy: { name: 'Trening', blast: null, rush: [2, 3], atk: null, tele: 1, combo: 0, block: 0, dmg: 0.3, beam: 1.2, engageCD: 2 },
+  idle: { name: 'Trening', blast: null, rush: null, atk: null, tele: 1, combo: 0, block: 0, dmg: 0.3, beam: 1.2, engageCD: 6 },
+  attacker: { name: 'Trening', blast: null, rush: [2, 3], atk: [1.6, 2.2], tele: 1.3, combo: 0, block: 0, dmg: 0.3, beam: 1.2, engageCD: 2 },
+};
+const MAX_FORMS = [0, 1, 1, 2];
 const roll = (r) => (r ? rand(r[0], r[1]) : Infinity);
 const ZONES = ['high', 'left', 'right', 'low'];
 const ZONE_NAMES = { high: 'z góry', left: 'z lewej', right: 'z prawej', low: 'dołem' };
@@ -144,6 +151,8 @@ export class Enemy {
 
   spawn(first = false) {
     this.hp = this.maxHp;
+    this.form = 0;
+    this.powerup = 0;
     this.state = 'fly';
     this.timer = 0;
     this.vel.set(0, 0, 0);
@@ -295,7 +304,27 @@ export class Enemy {
     else this.recoil.addScaledVector(dir, 0.25);
   }
   // cios wręcz: reakcja zależna od kierunku; przy mocnym ciosie wyrzut po krótkiej chwili
-  get A() { return AGGR[this.aggr] || AGGR[2]; }
+  get A() { return this.trainProfile || AGGR[this.aggr] || AGGR[2]; }
+  setTraining(name) { this.trainProfile = name ? TRAIN[name] : null; this.rushT = roll(this.A.rush); this.blastT = roll(this.A.blast); this.atkT = roll(this.A.atk); }
+  get formMul() { return 1 + this.form * 0.3; }
+  // gotowy na kolejny cios dopiero, gdy wróci po odrzucie i skończy reakcję
+  readyForHit() {
+    if (this.state !== 'melee') return true;
+    return this.recoil.length() < 0.5 && (!this.reaction || this.reaction.t > this.reaction.dur * 0.6);
+  }
+  // czy pora na przemianę (mniej życia → wyższa forma)
+  wantsPowerUp() {
+    if (this.trainProfile || this.state !== 'fly' || !this.hittable) return false;
+    const max = MAX_FORMS[this.aggr] || 0;
+    if (this.form >= max) return false;
+    const th = this.form === 0 ? 0.5 : 0.25;
+    return this.hp < this.maxHp * th;
+  }
+  powerUp() {
+    this.form++;
+    this.hp = Math.min(this.maxHp, this.hp + this.maxHp * 0.2);
+    this.drawHp();
+  }
   setAggr(i) {
     this.aggr = Math.max(0, Math.min(AGGR.length - 1, i));
     this.blastT = Math.min(this.blastT, roll(this.A.blast));
@@ -307,7 +336,7 @@ export class Enemy {
   startCharging() { this.state = 'charging'; this.timer = 0; this.attack = null; this.markMat.opacity = 0; }
   startStruggle() { this.state = 'struggle'; this.timer = 0; }
   endStruggle() { if (this.state === 'struggle' || this.state === 'charging') { this.state = 'fly'; this.wpT = 0; this.rushT = roll(this.A.rush); this.engageCD = 3; } }
-  beamForce() { return this.A.beam * (1 + (this.level - 1) * 0.08); }
+  beamForce() { return this.A.beam * (1 + (this.level - 1) * 0.08) * (1 + this.form * 0.25); }
 
   // knock: odrzut na kilka metrów po słabszym ciosie (potem wraca do zwarcia)
   hitMelee(dmg, dir, launchVel, ctx, reaction = 'head_back', strong = false, knock = 0) {
@@ -579,13 +608,13 @@ export class Enemy {
       if (!A.struck && A.t >= A.dur) {
         A.struck = true;
         this.markMat.opacity = 0;
-        if (ctx.checkBlock(target)) {
+        if (ctx.checkBlock(target, A.zone)) {
           ctx.onBlocked(target.clone());
           this.recoil.addScaledVector(ctx.bodyFwd, 0.3);
           this.react('head_back', 0.6);
           this.combo = 0;
         } else {
-          ctx.hurtPlayer((7 + this.level * 1.5) * this.A.dmg, target.clone());
+          ctx.hurtPlayer((7 + this.level * 1.5) * this.A.dmg * this.formMul, target.clone());
         }
       }
       if (A.t > A.dur + 0.22) {
@@ -621,7 +650,10 @@ export class Enemy {
       const L = this.limbs[side], s = L.s;
       const fist = _v1, foot = _v2;
       let snap = false;
-      if (st === 'embedded' || st === 'down' || st === 'ko') {
+      if (this.powerup > 0) {
+        // przemiana: pięści przy biodrach, ciało drży
+        fist.set(s * 0.34, -0.02, 0.1); foot.set(s * 0.22, -0.8, 0.02);
+      } else if (st === 'embedded' || st === 'down' || st === 'ko') {
         fist.set(s * 0.6, 0.55, -0.05); foot.set(s * 0.35, -0.7, 0);
       } else if (st === 'launched' || st === 'falling') {
         fist.set(s * 0.45, 0.75, -0.1); foot.set(s * 0.25, -0.7, -0.2);
@@ -661,7 +693,14 @@ export class Enemy {
       setLimb(L.thigh, H, K); L.knee.position.copy(K); setLimb(L.shin, K, L.footT); L.boot.position.copy(L.footT);
     }
     const flying = st === 'fly' || st === 'rush';
-    this.auraMat.opacity = flying ? 0.35 + (st === 'rush' ? 0.3 : 0) : st === 'melee' ? 0.25 : 0.1;
+    this.auraMat.opacity = Math.min(1, (flying ? 0.35 + (st === 'rush' ? 0.3 : 0) : st === 'melee' ? 0.25 : 0.1) + this.form * 0.15 + this.powerup * 0.6);
+    const as = (1 + this.form * 0.25 + this.powerup * (1.2 + Math.sin(t * 25) * 0.15));
+    this.aura.scale.set(1.6 * as, 2.4 * as, 1);
+    this.auraMat.color.setHex(this.form >= 2 ? 0xff1a6a : this.form === 1 ? 0xff2a3a : 0xff3048);
+    if (this.powerup > 0) {
+      this.body.position.x += (Math.random() - 0.5) * 0.03 * this.powerup;
+      this.head.rotation.x = -0.35 * this.powerup;
+    }
     for (const m of this.mats) m.emissive.setRGB(this.flash, this.flash * 0.9, this.flash * 0.8);
     if (this.rig) for (const m of this.rig.mats) m.emissive.setRGB(this.flash * 0.8, this.flash * 0.7, this.flash * 0.6);
     this.hpSprite.visible = this.root.visible && st !== 'gone' && st !== 'melee';

@@ -307,7 +307,8 @@ const smokeTex = (() => {
 
 export class Explosion {
   // color = kolor energii, hot = kolor jądra; ground = przy ziemi (fala kurzu); smoke = słup dymu
-  constructor(pos, size, { light = true, ground = false, color = 0x3aa8ff, hot = 0xd8f4ff, spark = 0xbff0ff, sparks = true, smoke, fire = true, dome } = {}) {
+  constructor(pos, size, { light = true, ground = false, color = 0x3aa8ff, hot = 0xd8f4ff, spark = 0xbff0ff, sparks = true, smoke, fire = true, dome, flash = 1 } = {}) {
+    this.flashK = flash;
     this.size = size;
     this.t = 0;
     smoke = smoke ?? (ground || size > 0.9);
@@ -393,10 +394,10 @@ export class Explosion {
     this.t += dt;
     const t = this.t, s = this.size;
     const e = 1 - Math.pow(1 - Math.min(1, t / 0.3), 3);
-    this.flash.scale.setScalar(s * (0.5 + 4 * e));
-    this.flashMat.opacity = Math.max(0, 1 - t / 0.35);
-    this.cloud.scale.setScalar(s * (1 + 6 * e));
-    this.cloudMat.opacity = Math.max(0, 0.9 - t / 1.1);
+    this.flash.scale.setScalar(s * (0.5 + 4 * e) * this.flashK);
+    this.flashMat.opacity = Math.max(0, 1 - t / 0.35) * Math.min(1, this.flashK);
+    this.cloud.scale.setScalar(s * (1 + 6 * e) * Math.max(0.4, this.flashK));
+    this.cloudMat.opacity = Math.max(0, 0.9 - t / 1.1) * Math.min(1, this.flashK);
     this.ring.quaternion.copy(camera.getWorldQuaternion(_q));
     const rs = s * (0.3 + t * 10);
     this.ring.scale.setScalar(rs);
@@ -536,6 +537,14 @@ export class SpeedLines {
     }
     this.geo.attributes.position.needsUpdate = true;
   }
+}
+// iskra trafienia w walce wręcz — wyraźna, ale nie zasłania widoku
+export function meleeSpark(pos, power, color = 0xffffff) {
+  return boom(pos, 0.12 + power * 0.22, { light: false, color, spark: color, hot: 0xffffff, fire: false, smoke: false, dome: false, flash: 0.35 });
+}
+// błysk teleportu
+export function teleportFlash(pos) {
+  return boom(pos, 0.5, { light: true, color: 0x9fdcff, hot: 0xffffff, spark: 0xe8f8ff, fire: false, smoke: false, dome: true, flash: 0.6 });
 }
 export function hitSpark(pos, power, color = 0xffffff) {
   return boom(pos, 0.15 + power * 0.35, { light: false, color, spark: color, hot: 0xffffff, fire: power > 0.6, smoke: false, dome: power > 0.5 });

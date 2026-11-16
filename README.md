@@ -6,7 +6,7 @@ Symulatory WebXR do testowania na Meta Quest 3 / 3S. Wszystko działa w przeglą
 
 | Symulator | Opis |
 |---|---|
-| [⚡ Kula Energii](sims/energy-ball/) | Pustynny kanion: kule energii z dłoni, fala, wielka kula, aura i formy mocy, latanie, rywal do walki wręcz i na dystans, kratery i wgniecenia w ścianach. |
+| [⚡ Kula Energii](sims/energy-ball/) | Pustynny kanion (ok. 700 m, ściany ~100 m): kule energii z dłoni, fala, wielka kula, aura i formy mocy, latanie, rywal do walki wręcz i na dystans, kratery i wgniecenia w ścianach. |
 
 ## Jak uruchomić na Quest
 
@@ -35,6 +35,18 @@ Symulatory WebXR do testowania na Meta Quest 3 / 3S. Wszystko działa w przeglą
 
 **Pojedynek fal:** gdy ładujesz falę i patrzysz na rywala, on też ładuje swoją. Kiedy puścisz — fale zderzają się w jednym punkcie. Klikaj spust jak najszybciej: punkt przesuwa się w stronę słabszego, a kto przegra, obrywa wielkim wybuchem.
 
+**Teleport**
+
+| Ruch | Efekt |
+|---|---|
+| Prawy kontroler przy czole + SPUST i CHWYT prawej ręki (trzymaj) | celowanie: lewą ręką wskazujesz miejsce, lewa gałka zmienia odległość; widać linię i kółko lądowania |
+| Puść prawą rękę | teleport (koszt: 1/4 KI na poziomie 0, mniej na wyższych) |
+| Dwa szybkie SPUST+CHWYT prawej, gdy rywal leci po mocnym ciosie | teleport tuż przed niego i automatyczny cios w inną stronę (koszt: 30% KI) |
+
+Zmiana poziomu (twoja albo rywala, który przechodzi na wyższą formę przy mniejszym życiu) to 5-sekundowy przerywnik — kamera z trzeciej osoby krąży wokół przemieniającej się postaci.
+
+**Trening:** przycisk „Trening” na stronie uruchamia samouczek krok po kroku (B = pomiń zadanie).
+
 **Walka wręcz** — włącza się sama, gdy jesteś blisko rywala. Tylko ręce i nogi, bez kul.
 
 | Przycisk | Efekt |
@@ -42,10 +54,10 @@ Symulatory WebXR do testowania na Meta Quest 3 / 3S. Wszystko działa w przeglą
 | Spust (trzymaj, puść) | pięść; mocno naładowana = zamaszysty cios z doskokiem |
 | Chwyt (trzymaj, puść) | kopnięcie; mocno naładowane = okrężne |
 | Gdzie trzymasz rękę | nad rywalem = cios z góry, pod nim = podbródkowy, z boku = sierpowy |
-| X / A (trzymaj) | blok — ręka tam, skąd leci cios (czerwony znacznik); odbija też jego pociski |
+| X / A (trzymaj) | blok — ręka przechodzi w gardę i chroni ćwiartkę ciała, w której jest: nad głową, z lewej, z prawej albo nisko (wtedy też unosisz kolano); odbija też jego pociski |
 | Oba spusty z rękami w górze, puść ruchem w dół | młot — wbija go w ziemię |
 
-Ciosy są animowane: kolejny wychodzi dopiero po skończeniu poprzedniego (jedno wciśnięcie zostaje zapamiętane). Przy trafieniu gra na chwilę zamiera, a rywal reaguje zależnie od kierunku ciosu. Mocny cios wyrzuca go z walki — leci, wbija się w ściany i słupy albo robi krater.
+Ciosy są animowane: kolejny wychodzi dopiero po skończeniu poprzedniego i gdy rywal wróci do zwarcia (jedno wciśnięcie zostaje zapamiętane). Słaby cios tylko go zachwieje, średni odrzuci na kilka metrów, mocny wyrzuci. Przy trafieniu gra na chwilę zamiera, a rywal reaguje zależnie od kierunku ciosu. Mocny cios wyrzuca go z walki — leci, wbija się w ściany i słupy albo robi krater.
 
 Na samych dłoniach (bez kontrolerów): pięść = chwyt, szczypnięcie = spust.
 
@@ -55,7 +67,7 @@ Na stronie symulatora jest przycisk **Własny model rywala (.glb)**. Model musi 
 
 ## Podgląd na komputerze
 
-Lewa ręka: `Q` spust, `A` chwyt, `Z` blok. Prawa: `E`, `D`, `C`. Pozy rąk: `1` razem, `2` w górę, `3` w dół. `Spacja` = fala, `T` = poziom (przytrzymaj = niżej), `Shift` + `Q`+`E` = turbo, `G` = agresja, `M` = muzyka, `R` = powrót, mysz = rozglądanie.
+Lewa ręka: `Q` spust, `A` chwyt, `Z` blok. Prawa: `E`, `D`, `C`. Pozy rąk: `1` razem, `2` w górę, `3` w dół. `Spacja` = fala, `T` = poziom (przytrzymaj = niżej), `Shift` + `Q`+`E` = turbo, `V` (trzymaj, kółko myszy) = teleport, `X` 2× = teleport za rywalem, `N` = pomiń krok treningu, `G` = agresja, `M` = muzyka, `R` = powrót, mysz = rozglądanie.
 
 ## Strojenie gestu
 

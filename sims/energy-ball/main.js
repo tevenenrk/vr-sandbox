@@ -19,7 +19,7 @@ import { XRHandModelFactory } from 'three/addons/webxr/XRHandModelFactory.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { renderer, scene, rig, camera, state, UP, clamp, rand, makeCanvasTex, glowTex } from './core.js';
 import { sfx, music, HUM_KAME, HUM_SMALL, HUM_GIANT, HUM_AURA, HUM_STRUGGLE } from './audio.js';
-import { EnergyBall, Beam, KAME_STYLE, SMALL_STYLE, GIANT_STYLE, RED_STYLE, RED_KAME_STYLE, CLASH_STYLE, Aura, Trail, SpeedLines, boom, hitSpark, fadeBall, updateFx } from './fx.js';
+import { meleeSpark, teleportFlash, EnergyBall, Beam, KAME_STYLE, SMALL_STYLE, GIANT_STYLE, RED_STYLE, RED_KAME_STYLE, CLASH_STYLE, Aura, Trail, SpeedLines, boom, hitSpark, fadeBall, updateFx } from './fx.js';
 import { heightAt, findSurface, impact, pillarHit, wallDecal, spawnDebris, updateWorld, setWorldMode, debrisGeo, debrisMat, isOpen, ARENA_RADIUS } from './world.js';
 import { Avatar } from './avatar.js';
 import { Enemy, AGGR } from './enemy.js';
@@ -41,7 +41,7 @@ const CFG = {
   reach: 2.4,            // zasięg ciosów od głowy do klatki rywala
   aim: THREE.MathUtils.degToRad(12),
   aimEnemy: THREE.MathUtils.degToRad(18),
-  flySpeeds: [7, 10, 13, 16],
+  flySpeeds: [10, 14, 18, 22],
   dmgMul: [1, 1.5, 2.1, 2.8],       // siła ciosów na poziomach
   staMul: [1, 1.25, 1.5, 1.75],     // koszt staminy na poziomach (rośnie wolniej niż siła — opłaca się)
   upkeep: [0, 0.6, 1.2, 1.8],       // stały spadek staminy na poziomie (na sekundę)
@@ -171,6 +171,7 @@ function readDeskInput(st, dt) {
   st.grp = !!(keys[left ? 'KeyA' : 'KeyD'] || keys.Space);
   st.blk = !!keys[left ? 'KeyZ' : 'KeyC'];
   st.back = left ? !!keys.KeyT : false;
+  if (!left && keys.KeyX) { st.trig = true; st.grp = true; } // prawa: SPUST+CHWYT naraz (teleport za rywalem)
 }
 
 function trackVelocity(st, now) {
@@ -252,7 +253,9 @@ function levelUp() {
   if (P.form >= 3) { msg('To już najwyższy poziom', 1.2); return; }
   if (P.ki < 1) { msg('Naładuj KI aurą: ręce w dół + oba chwyty', 2); return; }
   P.ki = 0;
-  transform(P.form + 1);
+  const n = P.form + 1;
+  EV.level++;
+  startCutscene('player', () => transform(n, CS.head));
 }
 function levelDown() {
   if (P.form <= 0) return;
@@ -261,20 +264,20 @@ function levelDown() {
   sfx.fizzle();
   msg(`Poziom ${P.form}`, 1.5);
 }
-function transform(n) {
+function transform(n, head = F.head) {
   P.form = n;
   aura.form = n;
   aura.level = 1;
-  const feet = _v1.copy(F.head); feet.y = heightAt(feet.x, feet.z);
-  const near = F.head.y - feet.y < 3;
-  boom(near ? feet : _v2.copy(F.head).addScaledVector(UP, -1), 1.4 + n * 0.5, { big: true, color: 0xffc040, hot: 0xfff0c0, spark: 0xfff0a0, ground: near });
+  const feet = _v1.copy(head); feet.y = heightAt(feet.x, feet.z);
+  const near = head.y - feet.y < 3;
+  boom(near ? feet : _v2.copy(head).addScaledVector(UP, -1), 1.4 + n * 0.5, { big: true, color: 0xffc040, hot: 0xfff0c0, spark: 0xfff0a0, ground: near });
   if (near) impact(feet, 1 + n * 0.5, _n);
   sfx.transform(n);
   P.flash = 0.8; P.flashColor.setHex(0xffd060);
   pulseAll(1, 500);
   msg(`POZIOM ${n}!  Siła ×${CFG.dmgMul[n]}`, 2.5);
-  if (enemy.hittable && (enemy.state === 'melee' || enemy.chestW.distanceTo(F.head) < 4)) {
-    _v1.subVectors(enemy.chestW, F.head).setY(0).normalize().multiplyScalar(22).addScaledVector(UP, 6);
+  if (enemy.hittable && (enemy.state === 'melee' || enemy.chestW.distanceTo(head) < 4)) {
+    _v1.subVectors(enemy.chestW, head).setY(0).normalize().multiplyScalar(22).addScaledVector(UP, 6);
     enemy.launch(_v1.clone(), ctx);
   }
 }
@@ -297,6 +300,16 @@ function resetRig() {
   FLY.speed = 0;
 }
 
+// ćwiartka ciała, w której jest ręka (względem głowy i tułowia)
+function handZone(st) {
+  _v3.subVectors(st.pos, F.head);
+  if (_v3.y > 0.02) return 'high';
+  if (_v3.y < -0.42) return 'low';
+  return _v3.dot(F.right) < 0 ? 'left' : 'right';
+}
+// liczniki zdarzeń (do trybu treningu)
+const EV = { small: 0, kame: 0, giant: 0, flyTime: 0, turbo: 0, level: 0, tp: 0, tpStrike: 0, melee: 0, strong: 0, block: 0, hammer: 0, struggle: 0, bothTrig: 0 };
+
 // ---------------------------------------------------------------------------
 // Przeciwnik i kontekst dla jego AI
 // ---------------------------------------------------------------------------
@@ -307,13 +320,15 @@ const ctx = {
   anchor: new THREE.Vector3(),   // głowa bez doskoku kamery (rywal trzyma dystans od tego punktu)
   bodyFwd: avatar.bodyFwd,
   right: new THREE.Vector3(),
-  checkBlock(point) {
-    if (!renderer.xr.isPresenting) return !!(keys.KeyZ || keys.KeyC);
-    return inputs.some(st => st.blocking && st.pos.distanceTo(point) < 0.42);
+  // blok chroni ćwiartkę ciała, w której jest blokująca ręka (góra / lewo / prawo / dół)
+  checkBlock(point, zone) {
+    return inputs.some(st => st.blocking && st.blockZone === zone);
   },
   onBlocked(point) {
     sfx.block(point);
-    hitSpark(point, 0.4, 0xfff0c0);
+    meleeSpark(point, 0.5, 0xbfe8ff);
+    EV.block++;
+    blockFlash = 1;
     P.sta = Math.max(0, P.sta - 4 * staMul());
     P.hitStop = 0.05;
     pulseAll(0.5, 60);
@@ -409,6 +424,7 @@ function updateSingle(st, dt) {
     const dir = aimAssist(st.aim.clone(), b.group.position);
     projectiles.push({ kind: 'small', ball: b, vel: dir.multiplyScalar(20 + c * 6), charge: c, age: 0, origin: b.group.position.clone(), prev: new THREE.Vector3() });
     stats.shots++;
+    EV.small++;
     sfx.smallShot();
     pulse(st, 0.4 + c * 0.4, 80);
   }
@@ -450,6 +466,7 @@ function fireKame() {
   K.hum = stopHum(K.hum);
   if (!b) return;
   if (c < CFG.minKame || !spend(14 + 22 * c)) { fizzleBall(b); enemyReleaseCharge(); return; }
+  EV.kame++;
   if (K.eBall && enemy.state === 'charging') { startStruggle(b, c); return; }
   const L = side('left'), R = side('right');
   const dir = _v1.addVectors(L.aim, R.aim);
@@ -472,7 +489,7 @@ function fireKame() {
 
 // --- rywal odpowiada falą: ładuje razem z graczem, wypuszcza razem z nim ---
 function enemyMayMirror() {
-  if (!enemy.canCharge() || state.xrMode === 'ar') return false;
+  if (!enemy.canCharge() || state.xrMode === 'ar' || (TR.on && !TR.allowMirror)) return false;
   const d = enemy.chestW.distanceTo(F.head);
   if (d < 6 || d > 70) return false;
   _v1.subVectors(enemy.chestW, F.head).setY(0).normalize();
@@ -539,10 +556,12 @@ function updateStruggle(dt) {
     if (st.trig && !st.pTrig) { BS.mash += 1; pulse(st, 0.6, 35); P.lastAct = 0; }
   }
   BS.mash *= Math.exp(-dt * 2);
-  const pF = (1 + BS.c * 0.6) * Math.sqrt(dmgMul()) + BS.mash * 0.5;
+  const pBase = (0.8 + BS.c * 0.4) * Math.sqrt(dmgMul());
+  const pF = pBase + BS.mash * 0.5;
   const surge = Math.sin(BS.t * 1.7) * 0.15 + Math.sin(BS.t * 4.3) * 0.1 + (Math.sin(BS.t * 0.6) > 0.85 ? 0.35 : 0);
-  const eF = enemy.beamForce() * (1 + surge);
-  if (BS.extend >= 1) BS.u = clamp(BS.u + (pF - eF) * 0.09 * dt, 0, 1);
+  // bez klikania zawsze przegrywasz — rywal jest silniejszy od samej naładowanej fali
+  const eF = Math.max(enemy.beamForce(), pBase * 1.35) * (1 + surge);
+  if (BS.extend >= 1) BS.u = clamp(BS.u + (pF - eF) * 0.14 * dt, 0, 1);
   BS.pF = pF; BS.eF = eF;
   // punkt zderzenia przesuwa się w stronę słabszego
   BS.clashPos.lerpVectors(BS.pOrigin, BS.eOrigin, BS.u);
@@ -570,6 +589,7 @@ function updateStruggle(dt) {
 }
 function endStruggle(result) {
   BS.active = false;
+  EV.struggle++;
   for (const b of [BS.pBeam, BS.eBeam]) b.dispose();
   fadeBall(BS.pBall); fadeBall(BS.eBall); fadeBall(BS.clash);
   BS.hum = stopHum(BS.hum);
@@ -629,6 +649,7 @@ function throwGiant() {
   K.giantHum = stopHum(K.giantHum);
   if (!b) return;
   if (b.radius < CFG.giantMin || !spend(35)) { fizzleBall(b); return; }
+  EV.giant++;
   b.gathering = false;
   const dir = F.fwd.clone();
   if (dir.y > 0.2) dir.y = 0.2;
@@ -701,7 +722,8 @@ const REACT_BY_ZONE = { over: 'crush', upper: 'uppercut', hookL: 'hookL', hookR:
 const ZONE_TEXT = { over: 'z góry', upper: 'podbródkowy', hookL: 'sierpowy', hookR: 'sierpowy', straight: 'prosty', fold: 'kopnięcie' };
 
 function startStrike(kind, st, c) {
-  if (SK.cur) { SK.queue = { kind, st, c }; return; }
+  // nie szybciej niż animacja, a w zwarciu dopiero gdy rywal wróci po poprzednim ciosie
+  if (SK.cur || (P.inMelee && !enemy.readyForHit())) { SK.queue = { kind, st, c, t: clock.elapsedTime }; return; }
   let style = kind === 'punch' ? (c >= 0.7 ? 'power' : 'jab') : kind === 'kick' ? (c >= 0.65 ? 'round' : 'kick') : 'hammer';
   if (!spend(STYLE[style].cost * (1 + c * 0.5))) {
     c = Math.min(c, 0.25);
@@ -805,9 +827,12 @@ function resolveStrike(cur) {
   }
   const away = _v1.subVectors(enemy.chestW, F.head).setY(0).normalize().clone();
   const juggle = enemy.state !== 'melee';
+  // siła: słaby (krótka reakcja), średni (odrzut na kilka metrów), mocny (wyrzut)
+  const tier = (c >= 0.7 || cur.style === 'hammer' || cur.forceLaunch) ? 'strong' : c >= 0.35 ? 'medium' : 'weak';
   const dmg = cur.S.dmg * (0.6 + c * 0.8) * dm;
   let launch = null;
-  if ((strong && (c >= 0.7 || cur.style === 'hammer')) || (juggle && c >= 0.3)) {
+  if (cur.forceLaunch) launch = cur.forceLaunch;
+  else if (tier === 'strong' || (juggle && c >= 0.3)) {
     const d = new THREE.Vector3();
     switch (cur.zone) {
       case 'over': d.copy(away).multiplyScalar(0.3).addScaledVector(UP, -1); break;
@@ -819,10 +844,12 @@ function resolveStrike(cur) {
     }
     launch = d.normalize().multiplyScalar((16 + c * 26) * Math.sqrt(dm) * (cur.style === 'hammer' ? 1.3 : 1));
   }
-  const knock = launch ? 0 : ({ jab: 2.6, kick: 3.4, power: 4, round: 4.5, hammer: 3 })[cur.style];
+  const knock = launch ? 0 : tier === 'medium' ? (cur.kind === 'kick' ? 3.2 : 2.6) : 0.35;
   enemy.hitMelee(dmg, away, launch, ctx, REACT_BY_ZONE[cur.zone] || 'head_back', strong, knock);
-  hitSpark(hitPos, strong ? 1 : 0.45, strong ? 0xffe080 : 0xffffff);
-  if (strong) boom(hitPos, 0.35 + c * 0.3, { light: true, color: 0xffb040, hot: 0xffffff, spark: 0xfff0c0, smoke: false });
+  meleeSpark(hitPos, tier === 'strong' ? 1 : tier === 'medium' ? 0.6 : 0.3, launch ? 0xffe080 : 0xffffff);
+  EV.melee++;
+  if (launch) EV.strong++;
+  if (cur.style === 'hammer') EV.hammer++;
   sfx.punch(Math.min(1, c + (strong ? 0.3 : 0)), hitPos);
   pulse(cur.st, 0.4 + c * 0.6, 60 + c * 140);
   if (cur.style === 'hammer') pulseAll(1, 250);
@@ -844,7 +871,8 @@ function updateCombat(dt) {
   // dwa szybkie kliknięcia obu spustów → turbo lot (na komputerze także Shift)
   if (bothTrig && !FLY.prevBoth) {
     const now = clock.elapsedTime;
-    if (now - FLY.lastTap < 0.5 && FLY.want) { FLY.turbo = true; sfx.fire(0.4); msg('TURBO!', 0.8); }
+    if (now - FLY.lastTap < 0.5 && FLY.want) { FLY.turbo = true; EV.turbo++; sfx.fire(0.4); msg('TURBO!', 0.8); }
+    EV.bothTrig++;
     FLY.lastTap = now;
   }
   if (!FLY.want) FLY.turbo = false;
@@ -876,6 +904,9 @@ function updateCombat(dt) {
       if (!st.grp && st.pGrp && st.kickC >= 0) { startStrike('kick', st, st.kickC); st.kickC = -1; }
     } else st.kickC = -1;
     st.blocking = st.blk && st.valid;
+    st.blockZone = st.blocking ? handZone(st) : null;
+    if (st.blocking && !st.pBlk) sfx.shieldUp();
+    st.pBlk = st.blocking;
     if (st.kick.t >= 0) { st.kick.t += dt; if (st.kick.t > st.kick.dur) st.kick.t = -1; }
   }
   if (HAM.armed && !L.trig && !R.trig) HAM.armed = false;
@@ -887,8 +918,12 @@ function updateCombat(dt) {
     if (!cur.hit && cur.t >= cur.S.hit) { cur.hit = true; resolveStrike(cur); }
     if (cur.t >= cur.S.dur) {
       SK.cur = null;
-      if (SK.queue) { const q = SK.queue; SK.queue = null; startStrike(q.kind, q.st, q.c); }
     }
+  }
+  if (!SK.cur && SK.queue) {
+    const q = SK.queue;
+    if (clock.elapsedTime - q.t > 1.5) SK.queue = null;
+    else if (!P.inMelee || enemy.readyForHit()) { SK.queue = null; startStrike(q.kind, q.st, q.c); }
   }
   // przesunięcie kamery za ciosem (dodawane do pozycji gracza i zdejmowane po ciosie)
   if (SK.cur) strikeCam(SK.cur, SK.camGoal); else SK.camGoal.set(0, 0, 0);
@@ -911,6 +946,7 @@ function moveRig(dt) {
   }
   const target = want ? (P.exhausted ? 4 : CFG.flySpeeds[P.form] * (FLY.turbo ? 2.6 : 1)) : 0;
   FLY.speed += (target - FLY.speed) * (1 - Math.exp(-dt * (want ? 2.5 : 4)));
+  if (want) EV.flyTime += dt;
   if (FLY.speed > 0.01) {
     const step = _v2.copy(FLY.dir).multiplyScalar(FLY.speed * dt);
     const nx = F.head.x + step.x, nz = F.head.z + step.z, ny = F.head.y + step.y;
@@ -924,7 +960,7 @@ function moveRig(dt) {
     rig.position.add(step);
     const r = Math.hypot(rig.position.x, rig.position.z);
     if (r > ARENA_RADIUS - 3) { rig.position.x *= (ARENA_RADIUS - 3) / r; rig.position.z *= (ARENA_RADIUS - 3) / r; }
-    rig.position.y = Math.min(rig.position.y, 90);
+    rig.position.y = Math.min(rig.position.y, 280);
     camera.getWorldPosition(_v1);
     const g2 = heightAt(_v1.x, _v1.z);
     if (_v1.y < g2 + 0.4) rig.position.y += g2 + 0.4 - _v1.y;
@@ -950,6 +986,7 @@ function updateButtonsXR() {
     if (stick && !st.pStick) { if (st.handedness === 'left') cycleAggr(); else toggleMusic(); }
     st.pStick = stick;
     if (st.handedness === 'right' && st.back && !st.pBack) {
+      if (trainingSkip()) { st.pBack = st.back; continue; }
       if (enemy.state === 'melee') enemy.leaveMelee(ctx);
       resetRig();
       msg('Powrót na start', 1);
@@ -1071,7 +1108,7 @@ function updateProjectiles(dt, t) {
     s.ball.update(dt, t);
     // blok = odbicie z powrotem w rywala
     const deskBlock = !renderer.xr.isPresenting && (keys.KeyZ || keys.KeyC) && pos.distanceTo(F.head) < 1.0;
-    if (deskBlock || inputs.some(st => st.blocking && st.pos.distanceTo(pos) < 0.45)) {
+    if (deskBlock || (inputs.some(st => st.blocking) && pos.distanceTo(F.head) < 1.1)) {
       const dir = _v1.subVectors(enemy.chestW, pos).normalize().clone();
       projectiles.push({ kind: 'small', ball: s.ball, vel: dir.multiplyScalar(22), charge: 0.7, age: 0, origin: pos.clone(), prev: new THREE.Vector3() });
       sfx.block(pos); hitSpark(pos, 0.4, 0xffd0d0); msg('Odbite!', 1);
@@ -1185,6 +1222,7 @@ function updateShards(dt) {
 // ---------------------------------------------------------------------------
 // HUD na nadgarstku + tablica z instrukcją + błysk obrażeń
 // ---------------------------------------------------------------------------
+let infoPanel = null;
 const hud = (() => {
   const { ctx: g, tex } = makeCanvasTex(512, 256);
   const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, depthWrite: false, transparent: true }));
@@ -1234,6 +1272,7 @@ function placeHud() {
   mesh.position.set(-1.7, 1.7, -2.0);
   mesh.lookAt(0, 1.6, 0);
   rig.add(mesh);
+  infoPanel = mesh;
   g.fillStyle = 'rgba(14,12,26,0.82)';
   g.beginPath(); if (g.roundRect) g.roundRect(4, 4, 1016, 892, 36); else g.rect(4, 4, 1016, 892); g.fill();
   g.strokeStyle = 'rgba(255,190,110,0.6)'; g.lineWidth = 4; g.stroke();
@@ -1261,6 +1300,7 @@ function placeHud() {
     'Chwyt obu, ręce w dół → aura ładuje KI',
     '(im mniej życia, tym szybciej)',
     'Pełne KI → Y = wyższy poziom, trzymaj Y = niższy',
+    'Prawy przy czole + SPUST+CHWYT → teleport (KI)',
     'B → powrót,  gałki: obrót / klik: agresja, muzyka',
   ]);
   tex.needsUpdate = true;
@@ -1328,6 +1368,12 @@ async function startSession(mode) {
 }
 btnVR.addEventListener('click', () => startSession('vr'));
 btnAR.addEventListener('click', () => startSession('ar'));
+const btnTrain = document.getElementById('btn-train');
+if (btnTrain) btnTrain.addEventListener('click', async () => {
+  startAudio();
+  if (!btnVR.disabled) { await startSession('vr'); if (renderer.xr.isPresenting) startTraining(); }
+  else { overlay.style.display = 'none'; startTraining(); }
+});
 
 const DESK_HELP = 'Podgląd: lewa ręka <kbd>Q</kbd> spust, <kbd>A</kbd> chwyt, <kbd>Z</kbd> blok; prawa <kbd>E</kbd>, <kbd>D</kbd>, <kbd>C</kbd>. Pozy: <kbd>1</kbd> dłonie razem, <kbd>2</kbd> w górę, <kbd>3</kbd> w dół. <kbd>Spacja</kbd> fala, <kbd>T</kbd> poziom (przytrzymaj = niżej), <kbd>R</kbd> powrót, mysz — rozglądanie.';
 (async () => {
@@ -1422,6 +1468,7 @@ document.getElementById('rival-clear').addEventListener('click', async () => {
 window.addEventListener('keydown', (e) => {
   if (['Space', 'KeyQ', 'KeyE', 'KeyA', 'KeyD'].includes(e.code)) startAudio();
   if (e.code === 'KeyG' && !e.repeat) cycleAggr();
+  if (e.code === 'KeyN' && !e.repeat) trainingSkip();
   if (e.code === 'KeyM' && !e.repeat) toggleMusic();
   if (e.code === 'Space') e.preventDefault();
   keys[e.code] = true;
@@ -1439,12 +1486,315 @@ window.addEventListener('pointermove', (e) => {
   applyDesktopCamera();
 });
 window.addEventListener('pointerup', () => { drag = null; });
+window.addEventListener('wheel', (e) => { if (TP.aiming) TP.dist = clamp(TP.dist - e.deltaY * 0.05, 3, 220); }, { passive: true });
 window.addEventListener('resize', () => {
   if (renderer.xr.isPresenting) return;
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
+
+// ---------------------------------------------------------------------------
+// Teleport: prawy kontroler przy czole + SPUST i CHWYT prawej ręki → lewą ręką wskaż miejsce,
+// lewa gałka = odległość, puść prawą → teleport. Dwa szybkie SPUST+CHWYT prawej, gdy rywal leci
+// po mocnym ciosie → teleport tuż przed niego i automatyczny cios w innym kierunku.
+// ---------------------------------------------------------------------------
+const TP = { aiming: false, dist: 15, point: new THREE.Vector3(), ground: false, comboPrev: false, lastCombo: -9, vPrev: false };
+const tpCost = () => 0.25 * [1, 0.85, 0.7, 0.6][P.form];
+const TPS_COST = 0.3;
+const tpLineGeo = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
+const tpLineMat = new THREE.LineBasicMaterial({ color: 0x9fe8ff, transparent: true, opacity: 0.9, depthTest: false, fog: false });
+const tpLine = new THREE.Line(tpLineGeo, tpLineMat);
+const tpDropGeo = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
+const tpDrop = new THREE.Line(tpDropGeo, tpLineMat);
+const tpRingMat = new THREE.MeshBasicMaterial({ color: 0x9fe8ff, transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthTest: false, blending: THREE.AdditiveBlending, fog: false });
+const tpRing = new THREE.Mesh(new THREE.RingGeometry(0.4, 0.55, 40).rotateX(-Math.PI / 2), tpRingMat);
+for (const o of [tpLine, tpDrop, tpRing]) { o.visible = false; o.frustumCulled = false; o.renderOrder = 30; scene.add(o); }
+
+function foreheadStance(R) {
+  if (!renderer.xr.isPresenting) return !!keys.KeyV;
+  const fh = _v1.copy(F.head).addScaledVector(UP, 0.06).addScaledVector(F.fwdFlat, 0.08);
+  return R.valid && R.pos.distanceTo(fh) < 0.2;
+}
+function setLine(geo, a, b) {
+  const p = geo.attributes.position.array;
+  p[0] = a.x; p[1] = a.y; p[2] = a.z; p[3] = b.x; p[4] = b.y; p[5] = b.z;
+  geo.attributes.position.needsUpdate = true;
+}
+function updateTeleport(dt) {
+  const L = side('left'), R = side('right');
+  const xr = renderer.xr.isPresenting;
+  const combo = R.valid && R.trig && R.grp;
+  const stance = foreheadStance(R);
+  if (!TP.aiming && combo && !TP.comboPrev && K.mode !== 'struggle') {
+    if (stance) {
+      if (P.ki >= tpCost()) { TP.aiming = true; TP.dist = 15; sfx.shieldUp(); }
+      else msg(`Za mało KI na teleport (potrzeba ${Math.round(tpCost() * 100)}%)`, 1.5);
+    } else {
+      const now = clock.elapsedTime;
+      if (now - TP.lastCombo < 0.5) tryTeleportStrike();
+      TP.lastCombo = now;
+    }
+  }
+  // na komputerze: przytrzymaj V, kółko myszy = odległość, puść V = teleport
+  if (!xr && keys.KeyV && !TP.vPrev && !TP.aiming) {
+    if (P.ki >= tpCost()) { TP.aiming = true; TP.dist = 15; } else msg('Za mało KI na teleport', 1.2);
+  }
+  TP.comboPrev = combo;
+  // prawa ręka zarezerwowana: bez kul i ciosów
+  if (combo || TP.aiming || (stance && (R.trig || R.grp))) {
+    R.trig = R.grp = false; R.punchC = -1; R.kickC = -1;
+    if (R.ball) { fadeBall(R.ball); R.ball = null; R.ballHum = stopHum(R.ballHum); }
+  }
+  if (TP.aiming) {
+    L.trig = L.grp = false;
+    const gp = L.gamepad;
+    const y = gp && gp.axes && gp.axes.length >= 4 ? gp.axes[3] : 0;
+    if (Math.abs(y) > 0.15) TP.dist = clamp(TP.dist - y * 45 * dt, 3, 220);
+    const origin = xr && L.valid ? L.pos : F.head, dir = xr && L.valid ? L.aim : F.fwd;
+    // wzdłuż promienia aż do terenu
+    let d = TP.dist; TP.ground = false;
+    for (let s = 1; s <= TP.dist; s += 1.5) {
+      _v2.copy(origin).addScaledVector(dir, s);
+      if (_v2.y < heightAt(_v2.x, _v2.z)) { d = s; TP.ground = true; break; }
+    }
+    TP.point.copy(origin).addScaledVector(dir, d);
+    const g = heightAt(TP.point.x, TP.point.z);
+    if (TP.ground || TP.point.y < g + 0.3) { TP.point.y = g + 0.05; TP.ground = true; }
+    const r = Math.hypot(TP.point.x, TP.point.z);
+    if (r > ARENA_RADIUS - 4) { TP.point.x *= (ARENA_RADIUS - 4) / r; TP.point.z *= (ARENA_RADIUS - 4) / r; }
+    setLine(tpLineGeo, origin, TP.point);
+    _v3.copy(TP.point); _v3.y = g;
+    setLine(tpDropGeo, TP.point, _v3);
+    tpRing.position.copy(TP.ground ? TP.point : _v3).y += 0.06;
+    tpRing.scale.setScalar(1 + Math.sin(clock.elapsedTime * 8) * 0.08);
+    tpLine.visible = tpRing.visible = true;
+    tpDrop.visible = !TP.ground;
+    const released = xr ? !combo : !keys.KeyV;
+    if (released) doTeleport();
+  }
+  TP.vPrev = !!keys.KeyV;
+}
+function moveHeadTo(dest) {
+  camera.getWorldPosition(_v1);
+  rig.position.add(_v2.subVectors(dest, _v1));
+  computeHead();
+  for (const st of inputs) { if (renderer.xr.isPresenting) readXRInput(st); else readDeskInput(st, 1); st.hist.length = 0; }
+}
+function doTeleport() {
+  TP.aiming = false;
+  tpLine.visible = tpRing.visible = tpDrop.visible = false;
+  if (P.ki < tpCost()) { msg('Za mało KI', 1); return; }
+  P.ki -= tpCost();
+  teleportFlash(_v1.copy(F.head).addScaledVector(UP, -0.5));
+  sfx.teleport();
+  const dest = TP.point.clone();
+  if (TP.ground) dest.y += 1.65;
+  dest.y = Math.max(dest.y, heightAt(dest.x, dest.z) + 1.65);
+  if (enemy.state === 'melee') enemy.leaveMelee(ctx);
+  FLY.speed = 0;
+  moveHeadTo(dest);
+  teleportFlash(_v1.copy(F.head).addScaledVector(UP, -0.5));
+  EV.tp++;
+}
+function tryTeleportStrike() {
+  if (enemy.state !== 'launched' || !enemy.hittable) { msg('Teleport za rywalem: najpierw wyrzuć go mocnym ciosem', 1.5); return; }
+  if (P.ki < TPS_COST) { msg('Za mało KI (potrzeba 30%)', 1.2); return; }
+  P.ki -= TPS_COST;
+  const flyDir = enemy.vel.lengthSq() > 1 ? enemy.vel.clone().normalize() : F.fwd.clone();
+  teleportFlash(_v1.copy(F.head).addScaledVector(UP, -0.5));
+  sfx.teleport();
+  // stań przed lecącym rywalem, twarzą do niego
+  const dest = enemy.pos.clone().addScaledVector(flyDir, 2).addScaledVector(UP, 0.35);
+  dest.y = Math.max(dest.y, heightAt(dest.x, dest.z) + 1.2);
+  _v1.subVectors(enemy.pos, dest).setY(0).normalize();
+  const ang = Math.atan2(F.fwdFlat.x * _v1.z - F.fwdFlat.z * _v1.x, F.fwdFlat.dot(_v1));
+  camera.getWorldPosition(_v2);
+  rig.position.sub(_v2).applyAxisAngle(UP, -ang).add(_v2);
+  rig.rotateY(-ang);
+  moveHeadTo(dest);
+  teleportFlash(_v1.copy(F.head).addScaledVector(UP, -0.4));
+  enemy.vel.set(0, 0, 0);
+  enemy.timer = 0;
+  // nowy kierunek: inny niż dotychczasowy lot (w górę, w dół albo w bok)
+  const options = [new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, -1, 0), F.right.clone(), F.right.clone().negate()]
+    .filter(d => d.dot(flyDir) < 0.3);
+  const nd = options[Math.floor(Math.random() * options.length)].clone().addScaledVector(F.fwdFlat, 0.3).normalize();
+  SK.cur = null; SK.queue = null;
+  const R = side('right');
+  startStrike('punch', R, 1);
+  if (SK.cur) SK.cur.forceLaunch = nd.multiplyScalar(32 * Math.sqrt(dmgMul()));
+  P.slowmo = 0.6;
+  EV.tpStrike++;
+  msg('TELEPORT + CIOS!', 1.5);
+}
+
+// ---------------------------------------------------------------------------
+// Przerywnik przy zmianie poziomu (5 s, kamera z trzeciej osoby krąży wokół postaci)
+// ---------------------------------------------------------------------------
+const CS = { active: false, t: 0, dur: 5, who: '', center: new THREE.Vector3(), saveRigPos: new THREE.Vector3(), saveRigRotY: 0, a0: 0, mid: false, onMid: null, head: new THREE.Vector3(), fwd: new THREE.Vector3() };
+const _eul = new THREE.Euler();
+function startCutscene(who, onMid) {
+  if (CS.active) { if (onMid) onMid(); return; }
+  cancelKi(); if (K.mode !== 'none') K.mode = 'wait';
+  if (TP.aiming) { TP.aiming = false; tpLine.visible = tpRing.visible = tpDrop.visible = false; }
+  SK.cur = null; SK.queue = null; FLY.speed = 0;
+  if (enemy.state === 'melee') enemy.leaveMelee(ctx);
+  CS.active = true; CS.t = 0; CS.mid = false; CS.who = who; CS.onMid = onMid;
+  CS.saveRigPos.copy(rig.position); CS.saveRigRotY = rig.rotation.y;
+  CS.head.copy(F.head); CS.fwd.copy(F.fwdFlat);
+  if (who === 'player') { CS.center.copy(F.head).addScaledVector(UP, -0.55); CS.a0 = Math.atan2(F.fwdFlat.x, F.fwdFlat.z); }
+  else {
+    enemy.root.updateMatrixWorld(true);
+    enemy.chest(CS.center);
+    _v1.set(0, 0, 1).applyQuaternion(enemy.root.quaternion);
+    CS.a0 = Math.atan2(_v1.x, _v1.z);
+  }
+  sfx.hum && (CS.hum = sfx.hum(HUM_AURA));
+}
+function updateCutscene(realDt) {
+  CS.t += realDt;
+  const k = Math.min(1, CS.t / CS.dur);
+  const ang = CS.a0 + (k - 0.15) * 1.7;
+  const dist = (CS.who === 'player' ? 3.0 : 4.2) - k * 0.7;
+  const O = _v1.set(Math.sin(ang) * dist, 0.25 + Math.sin(k * Math.PI) * 0.7, Math.cos(ang) * dist).add(CS.center);
+  O.y = Math.max(O.y, heightAt(O.x, O.z) + 0.6);
+  _eul.setFromQuaternion(camera.quaternion, 'YXZ');
+  const look = _v2.subVectors(CS.center, O);
+  const yaw = Math.atan2(-look.x, -look.z);
+  rig.rotation.set(0, yaw - _eul.y, 0);
+  rig.position.copy(O).sub(_v3.copy(camera.position).applyAxisAngle(UP, rig.rotation.y));
+  if (CS.who === 'player') aura.powering = true; else enemy.powerup = Math.min(1, 0.2 + k * 2);
+  if (CS.hum) CS.hum.update(Math.min(1, k * 1.5));
+  if (Math.random() < realDt * 10) pulseAll(0.2 + k * 0.5, 40);
+  if (!CS.mid && CS.t >= 2.3) { CS.mid = true; if (CS.onMid) CS.onMid(); }
+  const f = CS.t < 0.3 ? 1 - CS.t / 0.3 : CS.t > CS.dur - 0.3 ? (CS.t - (CS.dur - 0.3)) / 0.3 : 0;
+  P.flash = f; P.flashColor.setHex(0x000000);
+  if (CS.t >= CS.dur) {
+    CS.active = false;
+    rig.position.copy(CS.saveRigPos);
+    rig.rotation.set(0, CS.saveRigRotY, 0);
+    aura.powering = false;
+    enemy.powerup = 0;
+    CS.hum = stopHum(CS.hum);
+    P.flash = 0;
+  }
+}
+function enemyPowerUpScene() {
+  startCutscene('enemy', () => {
+    enemy.powerUp();
+    const pos = enemy.pos.clone();
+    boom(pos, 1.6, { big: true, color: 0xff2a4a, hot: 0xffd0d0, spark: 0xffb0c0, ground: false });
+    const g = heightAt(pos.x, pos.z);
+    if (pos.y - g < 4) impact(_v1.set(pos.x, g, pos.z), 1.5, _n);
+    sfx.transform(enemy.form + 1);
+    msg(`Rywal: forma ${enemy.form}! Silniejsze ciosy`, 3);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Tryb treningu: kolejne zadania z panelem przed graczem
+// ---------------------------------------------------------------------------
+const TR = { on: false, step: 0, t: 0, base: null, allowMirror: true };
+const evd = (k) => EV[k] - TR.base[k];
+function placeEnemyAhead(d, up = 3) {
+  enemy.state = 'fly'; enemy.root.visible = true; enemy.attack = null;
+  if (enemy.hp <= 0) enemy.spawn();
+  enemy.pos.copy(F.head).addScaledVector(F.fwdFlat, d);
+  enemy.pos.y = Math.max(enemy.pos.y + up, heightAt(enemy.pos.x, enemy.pos.z) + 1.5);
+  enemy.wp.copy(enemy.pos); enemy.wpT = 6; enemy.engageCD = 1;
+}
+const STEPS = [
+  { t: 'Witaj w treningu!', d: 'Na lewym nadgarstku masz paski: życie, stamina, KI, rywal.\nTen panel pokazuje zadania. B = pomiń zadanie.\nWciśnij oba SPUSTY, aby zacząć.',
+    setup() { enemy.setTraining('idle'); TR.allowMirror = false; placeEnemyAhead(45, 8); }, done: () => evd('bothTrig') > 0 && TR.t > 1 },
+  { t: 'Kula z jednej dłoni', d: 'Trzymaj CHWYT (dolny przycisk) jednej ręki —\nw dłoni rośnie kula. Puść, aby strzelić.\nStrzel 2 razy.', done: () => evd('small') >= 2 },
+  { t: 'Fala energii', d: 'Trzymaj oba CHWYTY z dłońmi blisko siebie.\nPuść, aby wystrzelić falę.', done: () => evd('kame') >= 1 },
+  { t: 'Wielka kula', d: 'Oba CHWYTY z rękami NAD GŁOWĄ —\nrośnie wielka kula. Puść, aby rzucić.', done: () => evd('giant') >= 1 },
+  { t: 'Lot', d: 'Trzymaj oba SPUSTY — lecisz tam,\ngdzie celują kontrolery. Leć 3 sekundy.', done: () => evd('flyTime') >= 3 },
+  { t: 'Turbo', d: 'Kliknij szybko 2× oba SPUSTY i trzymaj — TURBO.', done: () => evd('turbo') >= 1 },
+  { t: 'Aura i KI', d: 'Opuść ręce w dół i trzymaj oba CHWYTY.\nAura ładuje KI — im mniej życia, tym szybciej.\nNaładuj KI do pełna.',
+    setup() { P.hp = Math.min(P.hp, 40); P.ki = Math.min(P.ki, 0.4); }, done: () => P.ki >= 1 },
+  { t: 'Wyższy poziom', d: 'KI pełne! Wciśnij Y (górny przycisk lewego\nkontrolera) — przemiana na wyższy poziom.\nPrzytrzymanie Y cofa poziom.',
+    setup() { if (P.form >= 3) P.form = 2; P.ki = 1; }, done: () => evd('level') >= 1 && !CS.active },
+  { t: 'Teleport', d: 'Przyłóż prawy kontroler do czoła i przytrzymaj\nSPUST + CHWYT prawej ręki. Lewą ręką wskaż miejsce\n(lewa gałka = odległość). Puść prawą — teleport.',
+    setup() { P.ki = 1; }, done: () => evd('tp') >= 1 },
+  { t: 'Walka wręcz', d: 'Rywal podleci. SPUST = pięść, CHWYT = kopnięcie.\nSłaby cios go zachwieje, średni odrzuci.\nZadaj 4 ciosy.',
+    setup() { enemy.setTraining('dummy'); placeEnemyAhead(8, 0); }, done: () => evd('melee') >= 4 },
+  { t: 'Mocny cios', d: 'Przytrzymaj SPUST lub CHWYT ok. 1 s (pięść świeci)\ni puść — mocny cios wyrzuci rywala.', done: () => evd('strong') >= 1 },
+  { t: 'Teleport za rywalem', d: 'Wyrzuć rywala mocnym ciosem, a gdy leci —\nkliknij 2× szybko SPUST + CHWYT prawej ręki.\nTeleportujesz się przed niego i uderzysz.',
+    setup() { P.ki = 1; }, done: () => evd('tpStrike') >= 1 },
+  { t: 'Blok', d: 'Rywal atakuje powoli — czerwony znacznik pokazuje skąd.\nTrzymaj X (lewa) lub A (prawa) z ręką w tej ćwiartce:\nnad głową, z boku albo nisko. Zablokuj 3 ciosy.',
+    setup() { enemy.setTraining('attacker'); if (enemy.state !== 'melee') placeEnemyAhead(6, 0); }, done: () => evd('block') >= 3 },
+  { t: 'Młot', d: 'Przytrzymaj oba SPUSTY z rękami nad głową,\npotem szybko opuść ręce i puść.',
+    setup() { enemy.setTraining('dummy'); if (enemy.state !== 'melee') placeEnemyAhead(6, 0); }, done: () => evd('hammer') >= 1 },
+  { t: 'Pojedynek fal', d: 'Odsuń się od rywala (min. 6 m), patrz na niego\ni naładuj falę — rywal też ładuje. Po puszczeniu\nKLIKAJ SPUST jak najszybciej!',
+    setup() { enemy.setTraining('idle'); TR.allowMirror = true; if (enemy.state === 'melee') enemy.leaveMelee(ctx); placeEnemyAhead(25, 2); }, done: () => evd('struggle') >= 1 },
+  { t: 'Trening ukończony!', d: 'Brawo! B = koniec treningu.\nAgresję rywala zmienisz kliknięciem lewej gałki.', done: () => false },
+];
+const trainPanel = (() => {
+  const { ctx: g, tex } = makeCanvasTex(1024, 400);
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1.1, 0.43), new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false, fog: false }));
+  mesh.visible = false;
+  mesh.renderOrder = 28;
+  scene.add(mesh);
+  let last = '';
+  function draw() {
+    const S = STEPS[TR.step];
+    const key = TR.step + S.t;
+    if (key === last) return;
+    last = key;
+    g.clearRect(0, 0, 1024, 400);
+    g.fillStyle = 'rgba(8,16,30,0.86)';
+    g.beginPath(); if (g.roundRect) g.roundRect(4, 4, 1016, 392, 30); else g.rect(4, 4, 1016, 392); g.fill();
+    g.strokeStyle = 'rgba(120,220,255,0.7)'; g.lineWidth = 4; g.stroke();
+    g.fillStyle = '#7fd8ff'; g.font = 'bold 30px system-ui, sans-serif';
+    g.fillText(`TRENING  ${TR.step + 1}/${STEPS.length}`, 36, 56);
+    g.fillStyle = '#ffffff'; g.font = 'bold 52px system-ui, sans-serif';
+    g.fillText(S.t, 36, 122);
+    g.fillStyle = '#dfefff'; g.font = '34px system-ui, sans-serif';
+    S.d.split('\n').forEach((l, i) => g.fillText(l, 36, 190 + i * 50));
+    tex.needsUpdate = true;
+  }
+  return { mesh, draw };
+})();
+function startTraining() {
+  TR.on = true;
+  enterStep(0);
+  msg('Tryb treningu', 2);
+}
+function stopTraining() {
+  TR.on = false;
+  trainPanel.mesh.visible = false;
+  enemy.setTraining(null);
+  TR.allowMirror = true;
+  msg('Koniec treningu — walka!', 2);
+}
+function enterStep(i) {
+  TR.step = i; TR.t = 0; TR.base = { ...EV };
+  const S = STEPS[i];
+  if (S.setup) S.setup();
+  sfx.ding();
+}
+function updateTraining(dt) {
+  if (!TR.on) return;
+  TR.t += dt;
+  const S = STEPS[TR.step];
+  if (S.done && S.done()) { msg(`✔ ${S.t}`, 1.5); if (TR.step < STEPS.length - 1) enterStep(TR.step + 1); }
+  trainPanel.draw();
+  // panel lekko nad i przed graczem, podąża powoli
+  const m = trainPanel.mesh;
+  _v1.copy(F.head).addScaledVector(F.fwdFlat, 1.6).addScaledVector(UP, 0.42).addScaledVector(F.right, -0.25);
+  if (!m.visible) m.position.copy(_v1);
+  m.visible = true;
+  m.position.lerp(_v1, 1 - Math.exp(-dt * 2.5));
+  m.lookAt(F.head);
+}
+function trainingSkip() {
+  if (!TR.on) return false;
+  if (TR.step >= STEPS.length - 1) stopTraining();
+  else { msg('Pominięto', 1); enterStep(TR.step + 1); }
+  return true;
+}
 
 // ---------------------------------------------------------------------------
 // Pętla główna
@@ -1455,8 +1805,57 @@ const handsForAvatar = {
 };
 const kickForAvatar = { left: null, right: null };
 
+// tarcze bloku (świecą w chronionej ćwiartce)
+let blockFlash = 0;
+const shields = {};
+for (const s of ['left', 'right']) {
+  const m = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color: 0x8fdcff, blending: THREE.AdditiveBlending, transparent: true, opacity: 0, depthWrite: false, fog: false }));
+  m.renderOrder = 22;
+  scene.add(m);
+  shields[s] = m;
+}
+const legGuard = { left: false, right: false };
+
+// klatka w czasie przerywnika: rozgrywka zatrzymana, tylko przemiana i kamera
+function cutsceneFrame(realDt) {
+  const xr = renderer.xr.isPresenting;
+  for (const st of inputs) { if (xr) readXRInput(st); else readDeskInput(st, realDt); }
+  updateCutscene(realDt);
+  const t = clock.elapsedTime;
+  enemy.flash = 0;
+  if (infoPanel) infoPanel.visible = !CS.active;
+  hud.sprite.visible = !CS.active;
+  trainPanel.mesh.visible = TR.on && !CS.active;
+  if (CS.active && CS.who === 'player') {
+    aura.level += (1 - aura.level) * (1 - Math.exp(-realDt * 2));
+    aura.update(realDt, t, CS.head, heightAt(CS.head.x, CS.head.z));
+  } else aura.update(realDt, t, CS.head, heightAt(CS.head.x, CS.head.z));
+  enemy.pose(realDt, t, ctx);
+  // postać gracza w pozie ładowania (pięści przy biodrach)
+  _v3.crossVectors(CS.fwd, UP).normalize();
+  for (const s of ['left', 'right']) {
+    const h = handsForAvatar[s], sg = s === 'left' ? -1 : 1;
+    h.valid = true; h.isHand = false; h.blockZone = null; h.charge = CS.who === 'player' ? 0.6 : 0;
+    h.fistPos.copy(CS.head).addScaledVector(_v3, 0.3 * sg).addScaledVector(UP, -0.78).addScaledVector(CS.fwd, 0.06);
+    if (CS.who === 'player') h.fistPos.x += (Math.random() - 0.5) * 0.01;
+    h.quat.setFromUnitVectors(_v1.set(0, 0, -1), CS.fwd);
+  }
+  avatar.update({ dt: realDt, head: CS.head, headFwdFlat: CS.fwd, hands: handsForAvatar, flyDir: null, flySpeed: 0, kick: { left: null, right: null }, glow: aura.level, glowColor: GOLD, showHead: true });
+  updateFx(realDt, t);
+  updateWorld(realDt);
+  flashMat.color.copy(P.flashColor);
+  flashMat.opacity = P.flash;
+  flashSphere.visible = P.flash > 0.01;
+  hud.draw();
+  sfx.updateListener(camera);
+  for (const st of inputs) { st.pTrig = st.trig; st.pGrp = st.grp; st.pBack = st.back; }
+  if (!CS.active) computeHead();
+  renderer.render(scene, camera);
+}
+
 let gameTime = 0;
 function frame() {
+  if (CS.active) { cutsceneFrame(Math.min(clock.getDelta(), 0.05)); return; }
   const realDt = Math.min(clock.getDelta(), 0.05);
   // zamrożenie przy trafieniu i krótkie spowolnienie po mocnym ciosie
   let scale = 1;
@@ -1472,11 +1871,15 @@ function frame() {
   computeHands();
   ctx.right.copy(F.right);
 
+  updateTeleport(realDt);
   updateKi(dt);
   updateCombat(dt);
   moveRig(dt);
   if (xr) updateButtonsXR();
   updateLevelButton(realDt);
+  updateTraining(realDt);
+  // rywal przechodzi na wyższą formę, gdy traci życie
+  if (!BS.active && !P.inMelee && enemy.wantsPowerUp()) enemyPowerUpScene();
   computeHead();
   ctx.anchor.copy(F.head).sub(SK.camOff);
 
@@ -1521,9 +1924,23 @@ function frame() {
       if (cur.both) h.fistPos.addScaledVector(F.right, s === 'left' ? -0.06 : 0.06);
     }
     h.charge = Math.max(st.punchC, st.kickC, 0);
+    h.blockZone = st.blocking && !(cur && (cur.side === s || cur.both)) ? st.blockZone : null;
+    legGuard[s] = h.blockZone === 'low';
     kickForAvatar[s] = st.kick;
   }
-  avatar.update({ dt: realDt, head: F.head, headFwdFlat: F.fwdFlat, hands: handsForAvatar, flyDir: FLY.dir, flySpeed: FLY.speed, kick: kickForAvatar, glow: aura.level, glowColor: GOLD });
+  avatar.update({ dt: realDt, head: F.head, headFwdFlat: F.fwdFlat, hands: handsForAvatar, flyDir: FLY.dir, flySpeed: FLY.speed, kick: kickForAvatar, glow: aura.level, glowColor: GOLD, legGuard });
+  // tarcza w ćwiartce bloku
+  blockFlash = Math.max(0, blockFlash - realDt * 3);
+  for (const s of ['left', 'right']) {
+    const h = handsForAvatar[s], sh = shields[s];
+    const on = !!h.blockZone;
+    sh.material.opacity += ((on ? 0.35 + blockFlash * 0.6 : 0) - sh.material.opacity) * (1 - Math.exp(-realDt * 15));
+    sh.visible = sh.material.opacity > 0.01;
+    if (sh.visible) {
+      sh.position.copy(h.fistPos).addScaledVector(F.fwdFlat, 0.1);
+      sh.scale.setScalar(0.42 + blockFlash * 0.25 + Math.sin(clock.elapsedTime * 10) * 0.02);
+    }
+  }
   // smugi za pięścią i stopą przy mocnych ciosach
   const cur = SK.cur;
   const swing = cur && cur.style !== 'jab' && cur.style !== 'kick' && cur.t > cur.S.hit * 0.35 && cur.t < cur.S.hit + 0.08;
@@ -1554,4 +1971,4 @@ function frame() {
 renderer.setAnimationLoop(frame);
 
 // do testów w konsoli
-window.__sim = { BS, music, P, K, F, FLY, HAM, SK, enemy, inputs, stats, aura, avatar, rig, keys, desk, applyDesktopCamera, projectiles, eShots, heightAt, ctx, addKi, levelUp, boom, impact };
+window.__sim = { TP, CS, TR, EV, STEPS, startTraining, BS, music, P, K, F, FLY, HAM, SK, enemy, inputs, stats, aura, avatar, rig, keys, desk, applyDesktopCamera, projectiles, eShots, heightAt, ctx, addKi, levelUp, boom, impact };

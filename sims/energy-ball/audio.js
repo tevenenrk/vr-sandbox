@@ -134,6 +134,11 @@ class Sfx {
     this.tone({ type: 'triangle', f0: 1250, f1: 1150, gain: 0.18, dur: 0.25, out });
     this.tone({ type: 'triangle', f0: 1870, f1: 1800, gain: 0.1, dur: 0.2, out });
   }
+  teleport() {
+    this.tone({ type: 'sine', f0: 300, f1: 2600, gain: 0.25, dur: 0.18 });
+    this.burst({ type: 'highpass', f0: 4000, f1: 1500, gain: 0.3, dur: 0.2 });
+  }
+  shieldUp() { this.tone({ type: 'triangle', f0: 600, f1: 900, gain: 0.05, dur: 0.12 }); }
   whoosh(power) { this.burst({ type: 'bandpass', f0: 500, f1: 2600, q: 1.2, gain: 0.12 + power * 0.25, dur: 0.18 }); }
   warn() { this.tone({ type: 'square', f0: 520, f1: 780, gain: 0.06, dur: 0.12 }); }
   hurt() {
