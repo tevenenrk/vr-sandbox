@@ -21,10 +21,16 @@ import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 import { net, joinRoom, leaveRoom, send } from './net.js';
 import { renderer, scene, rig, camera, state, UP, clamp, rand, makeCanvasTex, glowTex } from './core.js';
 import { sfx, music, HUM_KAME, HUM_SMALL, HUM_GIANT, HUM_AURA, HUM_STRUGGLE } from './audio.js';
-import { meleeSpark, teleportFlash, EnergyBall, Beam, KAME_STYLE, SMALL_STYLE, GIANT_STYLE, RED_STYLE, RED_KAME_STYLE, CLASH_STYLE, Aura, Trail, SpeedLines, boom, hitSpark, fadeBall, updateFx } from './fx.js';
-import { heightAt, findSurface, impact, pillarHit, wallDecal, spawnDebris, updateWorld, setWorldMode, debrisGeo, debrisMat, isOpen, ARENA_RADIUS } from './world.js';
+import { explosions, fading, boomLight, meleeSpark, teleportFlash, EnergyBall, Beam, KAME_STYLE, SMALL_STYLE, GIANT_STYLE, RED_STYLE, RED_KAME_STYLE, CLASH_STYLE, Aura, Trail, SpeedLines, boom, hitSpark, fadeBall, updateFx } from './fx.js';
+import * as canyonWorld from './world.js';
+import * as planetWorld from './planet.js';
 import { Avatar } from './avatar.js';
 import { Enemy, AGGR } from './enemy.js';
+
+// tryb: kanion (domyślnie) albo mała planeta (?mode=planet)
+const MODE = new URLSearchParams(location.search).get('mode') === 'planet' ? 'planet' : 'canyon';
+const W = MODE === 'planet' ? planetWorld : canyonWorld;
+if (MODE === 'planet') { canyonWorld.env.visible = false; planetWorld.init(); }
 
 const CFG = {
   closeDist: 0.25,       // dłonie bliżej → fala energii zamiast dwóch kul
@@ -75,7 +81,7 @@ function applyDesktopCamera() {
   camera.rotation.set(desk.pitch, desk.yaw, 0, 'YXZ');
 }
 applyDesktopCamera();
-const START = new THREE.Vector3(0, heightAt(0, 0), 0);
+const START = new THREE.Vector3(0, W.heightAt(0, 0), 0);
 rig.position.copy(START);
 
 // ---------------------------------------------------------------------------
@@ -238,7 +244,7 @@ function spend(cost) {
   return true;
 }
 
-const aura = new Aura(debrisGeo, debrisMat);
+const aura = new Aura(W.debrisGeo, W.debrisMat);
 const avatar = new Avatar();
 const FLY = { speed: 0, dir: new THREE.Vector3(0, 0, -1), want: false, turbo: false, prevBoth: false, lastTap: -9 };
 const speedLines = new SpeedLines();
@@ -271,7 +277,7 @@ function transform(n, head = F.head) {
   P.form = n;
   aura.form = n;
   aura.level = 1;
-  const feet = _v1.copy(head); feet.y = heightAt(feet.x, feet.z);
+  const feet = _v1.copy(head); feet.y = W.heightAt(feet.x, feet.z);
   const near = head.y - feet.y < 3;
   boom(near ? feet : _v2.copy(head).addScaledVector(UP, -1), 1.4 + n * 0.5, { big: true, color: 0xffc040, hot: 0xfff0c0, spark: 0xfff0a0, ground: near });
   if (near) netImpact(feet, 1 + n * 0.5, _n);
@@ -300,6 +306,7 @@ function hurtPlayer(dmg) {
   } else msg('Trafiony!', 0.8);
 }
 function resetRig() {
+  if (MODE === 'planet') START.set(0, Math.max(W.heightAt(0, 0), W.CENTER.y + W.R0) + 1, 0);
   rig.position.copy(START);
   rig.rotation.set(0, 0, 0);
   FLY.speed = 0;
@@ -367,6 +374,7 @@ const K = { mode: 'none', eBall: null, kame: null, kameC: 0, apartT: 0, hum: nul
 const projectiles = [];
 const beams = [];
 
+const aimList = [];
 function aimAssist(dir, origin) {
   let best = null, bestAng = Infinity;
   const consider = (p, maxAng) => {
@@ -376,6 +384,7 @@ function aimAssist(dir, origin) {
   };
   if (enemy.hittable) consider(enemy.chestW, CFG.aimEnemy);
   for (const t of targets) if (t.alive) consider(t.group.position, CFG.aim);
+  if (W.aimTargets) for (const sp of W.aimTargets(aimList)) consider(sp, CFG.aimEnemy);
   if (best) dir.lerp(_v1.subVectors(best, origin).normalize(), 0.75).normalize();
   return dir;
 }
@@ -994,19 +1003,19 @@ function moveRig(dt) {
   if (FLY.speed > 0.01) {
     const step = _v2.copy(FLY.dir).multiplyScalar(FLY.speed * dt);
     const nx = F.head.x + step.x, nz = F.head.z + step.z, ny = F.head.y + step.y;
-    const g = heightAt(nx, nz);
+    const g = W.heightAt(nx, nz);
     if (g > ny - 0.4) {
       const climb = g - (ny - 0.4);
       if (climb < 1.2) step.y += climb;               // łagodne zbocze — wznieś się
       else { step.x = 0; step.z = 0; FLY.speed *= 0.6; } // ściana — stop
     }
-    if (pillarHit(_v3.set(nx, ny - 0.5, nz), 0.4, _n)) { step.x = 0; step.z = 0; }
+    if (W.pillarHit(_v3.set(nx, ny - 0.5, nz), 0.4, _n)) { step.x = 0; step.z = 0; }
     rig.position.add(step);
     const r = Math.hypot(rig.position.x, rig.position.z);
-    if (r > ARENA_RADIUS - 3) { rig.position.x *= (ARENA_RADIUS - 3) / r; rig.position.z *= (ARENA_RADIUS - 3) / r; }
-    rig.position.y = Math.min(rig.position.y, 280);
+    if (r > W.ARENA_RADIUS - 3) { rig.position.x *= (W.ARENA_RADIUS - 3) / r; rig.position.z *= (W.ARENA_RADIUS - 3) / r; }
+    rig.position.y = Math.min(rig.position.y, W.MAX_Y);
     camera.getWorldPosition(_v1);
-    const g2 = heightAt(_v1.x, _v1.z);
+    const g2 = W.heightAt(_v1.x, _v1.z);
     if (_v1.y < g2 + 0.4) rig.position.y += g2 + 0.4 - _v1.y;
   }
   sfx.wind(FLY.speed);
@@ -1064,8 +1073,14 @@ function detonate(p, pos, surface) {
   else if (p.kind === 'kame') { size = (0.35 + p.charge * 1.3) * sizeMul(); blast = (0.5 + p.charge * 2.2) * sizeMul(); crater = (0.8 + p.charge * 2.4) * sizeMul(); }
   else { size = 0.25 + p.charge * 0.4; blast = 0.4 + p.charge * 0.6; crater = 0.6 + p.charge * 0.9; }
   let floor = false;
+  // w pełni naładowana wielka kula rozsadza całą planetę
+  if (MODE === 'planet' && surface && p.kind === 'giant' && p.charge >= 0.95 && W.isAlive()) {
+    W.destroyPlanet(pos);
+    msg('PLANETA PĘKA!', 3);
+    P.slowmo = 1.5;
+  }
   if (surface) {
-    if (surface.wallN) { wallDecal(pos, surface.wallN, crater * 0.9); spawnDebris(pos, crater, surface.wallN); }
+    if (surface.wallN) { W.wallDecal(pos, surface.wallN, crater * 0.9); W.spawnDebris(pos, crater, surface.wallN); }
     else { netImpact(pos, crater, _n); floor = _n.y > 0.6; }
     stats.craters++;
   }
@@ -1114,14 +1129,30 @@ function updateProjectiles(dt, t) {
         }
       }
     }
-    if (!done && pos.y - r * 0.5 < heightAt(pos.x, pos.z)) {
+    // na planecie kule lekko naprowadzają się na statki
+    if (W.nearestShip && p.kind !== 'giant') {
+      _v1.copy(p.vel).normalize();
+      const tgt = W.nearestShip(pos, _v1, 0.94, _v3);
+      if (tgt) {
+        const sp = p.vel.length();
+        _v2.subVectors(tgt, pos).normalize();
+        _v1.lerp(_v2, 1 - Math.exp(-dt * 2.5)).normalize();
+        p.vel.copy(_v1).multiplyScalar(sp);
+      }
+    }
+    if (!done && W.hitShips && W.hitShips(pos, r)) {
+      stats.hits++;
+      msg('Statek zestrzelony!', 1.2);
+      if (p.kind !== 'giant') { if (p.beam) p.dead = true; fadeBall(p.ball); done = true; }
+    }
+    if (!done && W.below(pos, r * 0.5)) {
       _v2.copy(pos); _v2.y -= r * 0.5; _v3.copy(p.prev); _v3.y -= r * 0.5;
-      const hitP = findSurface(_v3, _v2, new THREE.Vector3());
+      const hitP = W.findSurface(_v3, _v2, new THREE.Vector3());
       detonate(p, hitP, {});
       done = true;
     }
-    if (!done && pillarHit(pos, r * 0.6, _n)) { detonate(p, pos.clone(), { wallN: _n.clone() }); done = true; }
-    if (!done && (pos.distanceTo(p.origin) > 130 || p.age > 15)) { fadeBall(p.ball); done = true; }
+    if (!done && W.pillarHit(pos, r * 0.6, _n)) { detonate(p, pos.clone(), { wallN: _n.clone() }); done = true; }
+    if (!done && (pos.distanceTo(p.origin) > (MODE === 'planet' ? 700 : 130) || p.age > 15)) { fadeBall(p.ball); done = true; }
     if (done) { projectiles.splice(i, 1); p.dead = true; }
   }
 
@@ -1166,8 +1197,8 @@ function updateProjectiles(dt, t) {
       boom(pos, 0.3, { light: false, color: 0xff3a3a, spark: 0xffb0b0 });
       hurtPlayer((9 + enemy.level) * enemy.A.dmg * (sr > 0.2 ? 2 : 1));
       gone = true;
-    } else if (pos.y < heightAt(pos.x, pos.z)) {
-      impact(pos, 0.8, _n);
+    } else if (pos.y < W.heightAt(pos.x, pos.z)) {
+      W.impact(pos, 0.8, _n);
       boom(pos, 0.35, { color: 0xff3a3a, spark: 0xffb0b0, ground: _n.y > 0.6 });
       sfx.explode(pos, 0.4);
       gone = true;
@@ -1214,9 +1245,9 @@ class Target {
       }
       const ang = Math.random() * Math.PI * 2, dist = 6 + Math.random() * 20;
       const x = Math.sin(ang) * dist, z = -10 + Math.cos(ang) * dist;
-      if (!isOpen(x, z, 2)) continue;
-      this.base.set(x, heightAt(x, z) + 1.2 + Math.random() * 4, z);
-      if (!pillarHit(this.base, 1)) break;
+      if (!W.isOpen(x, z, 2)) continue;
+      this.base.set(x, W.heightAt(x, z) + 1.2 + Math.random() * 4, z);
+      if (!W.pillarHit(this.base, 1)) break;
     }
     this.group.position.copy(this.base);
   }
@@ -1256,7 +1287,7 @@ function updateShards(dt) {
     s.life -= dt;
     s.vel.y -= 9.8 * dt;
     s.m.position.addScaledVector(s.vel, dt);
-    const g = heightAt(s.m.position.x, s.m.position.z) + 0.04;
+    const g = W.heightAt(s.m.position.x, s.m.position.z) + 0.04;
     if (s.m.position.y < g) { s.m.position.y = g; s.vel.multiplyScalar(0.5); s.vel.y = Math.abs(s.vel.y) * 0.5; }
     s.m.rotation.x += dt * 6; s.m.rotation.y += dt * 4;
     if (s.life < 0.5) s.m.scale.multiplyScalar(Math.pow(0.02, dt));
@@ -1279,7 +1310,7 @@ const hud = (() => {
     g.fillStyle = '#10131c'; g.font = 'bold 24px system-ui, sans-serif'; g.fillText(label, 26, y + 26);
   }
   function draw() {
-    const key = `${Math.round(P.hp)}|${Math.round(P.sta)}|${P.exhausted}|${Math.round(P.ki * 100)}|${P.form}|${Math.round(enemy.hp)}|${P.inMelee}|${BS.active ? Math.round(BS.u * 50) : -1}|${enemy.aggr}|${P.msgT > 0 ? P.msg : ''}`;
+    const key = `${MODE === 'planet' ? W.stats.buildings + '|' + W.stats.people + '|' + W.stats.ships + '|' + W.stats.destroyed : ''}|${Math.round(P.hp)}|${Math.round(P.sta)}|${P.exhausted}|${Math.round(P.ki * 100)}|${P.form}|${Math.round(enemy.hp)}|${P.inMelee}|${BS.active ? Math.round(BS.u * 50) : -1}|${enemy.aggr}|${P.msgT > 0 ? P.msg : ''}`;
     if (key === last) return;
     last = key;
     g.clearRect(0, 0, 512, 256);
@@ -1288,9 +1319,13 @@ const hud = (() => {
     bar(8, `ŻYCIE ${Math.round(P.hp)}`, P.hp / P.maxHp, '#58e07a');
     bar(44, P.exhausted ? 'STAMINA — ZMĘCZONY' : `STAMINA ${Math.round(P.sta)}`, P.sta / P.maxSta, P.exhausted ? '#ff8a5c' : '#5cc8ff');
     bar(80, P.ki >= 1 ? (P.form < 3 ? `KI PEŁNE → Y = poziom ${P.form + 1}` : 'KI PEŁNE') : `KI ${Math.round(P.ki * 100)}%`, P.ki, P.ki >= 1 ? '#fff07a' : '#ffd34d');
-    bar(116, `RYWAL ${Math.max(0, Math.round(enemy.hp))}/${enemy.maxHp}`, enemy.hp / enemy.maxHp, '#ff4a5a');
+    if (MODE === 'planet') {
+      const ps = W.stats;
+      bar(116, `MIASTA ${Math.round(ps.buildings / ps.buildings0 * 100)}%   LUDZIE ${ps.people}`, ps.buildings / ps.buildings0, '#7fd06a');
+    } else bar(116, `RYWAL ${Math.max(0, Math.round(enemy.hp))}/${enemy.maxHp}`, enemy.hp / enemy.maxHp, '#ff4a5a');
     g.fillStyle = '#ffcf7a'; g.font = 'bold 24px system-ui, sans-serif';
-    g.fillText(`Poz. ${P.form}  KO: ${stats.kos}  ${AGGR[enemy.aggr].name}${P.inMelee ? '  ⚔' : ''}`, 18, 178);
+    if (MODE === 'planet') g.fillText(`Poz. ${P.form}   Statki: ${W.stats.ships}   Zniszczone: ${W.stats.destroyed}`, 18, 178);
+    else g.fillText(`Poz. ${P.form}  KO: ${stats.kos}  ${AGGR[enemy.aggr].name}${P.inMelee ? '  ⚔' : ''}`, 18, 178);
     if (BS.active) {
       // pasek pojedynku: niebieski = ty, czerwony = rywal
       g.fillStyle = '#ff3a3a'; g.fillRect(16, 196, 480, 22);
@@ -1322,7 +1357,7 @@ function placeHud() {
   g.beginPath(); if (g.roundRect) g.roundRect(4, 4, 1016, 892, 36); else g.rect(4, 4, 1016, 892); g.fill();
   g.strokeStyle = 'rgba(255,190,110,0.6)'; g.lineWidth = 4; g.stroke();
   g.fillStyle = '#9fe6ff'; g.font = 'bold 56px system-ui, sans-serif';
-  g.fillText('⚡ KULA ENERGII — KANION', 40, 80);
+  g.fillText(MODE === 'planet' ? '🪐 KULA ENERGII — PLANETA' : '⚡ KULA ENERGII — KANION', 40, 80);
   const sec = (y, title, lines) => {
     g.fillStyle = '#ffcf7a'; g.font = 'bold 36px system-ui, sans-serif'; g.fillText(title, 40, y);
     g.fillStyle = '#e8f4ff'; g.font = '31px system-ui, sans-serif';
@@ -1385,7 +1420,7 @@ const overlay = document.getElementById('overlay');
 
 function setMode(mode) {
   state.xrMode = mode;
-  setWorldMode(mode);
+  W.setWorldMode(mode);
   renderer.setClearColor(0x000000, mode === 'ar' ? 0 : 1);
 }
 async function startSession(mode) {
@@ -1394,14 +1429,14 @@ async function startSession(mode) {
   try {
     const session = await navigator.xr.requestSession(type, { optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking'] });
     setMode(mode);
-    START.set(0, heightAt(0, 0), 0);
+    START.set(0, W.heightAt(0, 0), 0);
     resetRig();
     await renderer.xr.setSession(session);
     placeAllTargets();
     overlay.style.display = 'none';
     session.addEventListener('end', () => {
       setMode(null);
-      START.set(0, heightAt(0, 0), 0);
+      START.set(0, W.heightAt(0, 0), 0);
       resetRig();
       overlay.style.display = '';
       applyDesktopCamera();
@@ -1428,7 +1463,7 @@ const DESK_HELP = 'Podgląd: lewa ręka <kbd>Q</kbd> spust, <kbd>A</kbd> chwyt, 
     navigator.xr.isSessionSupported('immersive-ar').catch(() => false),
   ]);
   btnVR.disabled = !vr;
-  btnAR.disabled = !ar;
+  btnAR.disabled = !ar || MODE === 'planet';
   if (vr || ar) info.textContent = 'Gotowe! Najlepiej grać na kontrolerach (dłonie też działają: pięść = chwyt, szczypnięcie = spust).';
   else info.innerHTML = 'Brak urządzenia VR.<br>' + DESK_HELP;
 })();
@@ -1607,13 +1642,13 @@ function updateTeleport(dt) {
     let d = TP.dist; TP.ground = false;
     for (let s = 1; s <= TP.dist; s += 1.5) {
       _v2.copy(origin).addScaledVector(dir, s);
-      if (_v2.y < heightAt(_v2.x, _v2.z)) { d = s; TP.ground = true; break; }
+      if (_v2.y < W.heightAt(_v2.x, _v2.z)) { d = s; TP.ground = true; break; }
     }
     TP.point.copy(origin).addScaledVector(dir, d);
-    const g = heightAt(TP.point.x, TP.point.z);
+    const g = W.heightAt(TP.point.x, TP.point.z);
     if (TP.ground || TP.point.y < g + 0.3) { TP.point.y = g + 0.05; TP.ground = true; }
     const r = Math.hypot(TP.point.x, TP.point.z);
-    if (r > ARENA_RADIUS - 4) { TP.point.x *= (ARENA_RADIUS - 4) / r; TP.point.z *= (ARENA_RADIUS - 4) / r; }
+    if (r > W.ARENA_RADIUS - 4) { TP.point.x *= (W.ARENA_RADIUS - 4) / r; TP.point.z *= (W.ARENA_RADIUS - 4) / r; }
     setLine(tpLineGeo, origin, TP.point);
     _v3.copy(TP.point); _v3.y = g;
     setLine(tpDropGeo, TP.point, _v3);
@@ -1641,7 +1676,7 @@ function doTeleport() {
   sfx.teleport();
   const dest = TP.point.clone();
   if (TP.ground) dest.y += 1.65;
-  dest.y = Math.max(dest.y, heightAt(dest.x, dest.z) + 1.65);
+  dest.y = Math.max(dest.y, W.heightAt(dest.x, dest.z) + 1.65);
   if (enemy.state === 'melee') enemy.leaveMelee(ctx);
   FLY.speed = 0;
   const from = F.head.clone();
@@ -1659,7 +1694,7 @@ function tryTeleportStrike() {
   sfx.teleport();
   // stań przed lecącym rywalem, twarzą do niego
   const dest = enemy.pos.clone().addScaledVector(flyDir, 2).addScaledVector(UP, 0.35);
-  dest.y = Math.max(dest.y, heightAt(dest.x, dest.z) + 1.2);
+  dest.y = Math.max(dest.y, W.heightAt(dest.x, dest.z) + 1.2);
   _v1.subVectors(enemy.pos, dest).setY(0).normalize();
   const ang = Math.atan2(F.fwdFlat.x * _v1.z - F.fwdFlat.z * _v1.x, F.fwdFlat.dot(_v1));
   camera.getWorldPosition(_v2);
@@ -1711,7 +1746,7 @@ function updateCutscene(realDt) {
   const ang = CS.a0 + (k - 0.15) * 1.7;
   const dist = (CS.who === 'player' ? 3.0 : 4.2) - k * 0.7;
   const O = _v1.set(Math.sin(ang) * dist, 0.25 + Math.sin(k * Math.PI) * 0.7, Math.cos(ang) * dist).add(CS.center);
-  O.y = Math.max(O.y, heightAt(O.x, O.z) + 0.6);
+  O.y = Math.max(O.y, W.heightAt(O.x, O.z) + 0.6);
   _eul.setFromQuaternion(camera.quaternion, 'YXZ');
   const look = _v2.subVectors(CS.center, O);
   const yaw = Math.atan2(-look.x, -look.z);
@@ -1738,8 +1773,8 @@ function enemyPowerUpScene() {
     enemy.powerUp();
     const pos = enemy.pos.clone();
     boom(pos, 1.6, { big: true, color: 0xff2a4a, hot: 0xffd0d0, spark: 0xffb0c0, ground: false });
-    const g = heightAt(pos.x, pos.z);
-    if (pos.y - g < 4) impact(_v1.set(pos.x, g, pos.z), 1.5, _n);
+    const g = W.heightAt(pos.x, pos.z);
+    if (pos.y - g < 4) W.impact(_v1.set(pos.x, g, pos.z), 1.5, _n);
     sfx.transform(enemy.form + 1);
     msg(`Rywal: forma ${enemy.form}! Silniejsze ciosy`, 3);
   });
@@ -1754,7 +1789,7 @@ function placeEnemyAhead(d, up = 3) {
   enemy.state = 'fly'; enemy.root.visible = true; enemy.attack = null;
   if (enemy.hp <= 0) enemy.spawn();
   enemy.pos.copy(F.head).addScaledVector(F.fwdFlat, d);
-  enemy.pos.y = Math.max(enemy.pos.y + up, heightAt(enemy.pos.x, enemy.pos.z) + 1.5);
+  enemy.pos.y = Math.max(enemy.pos.y + up, W.heightAt(enemy.pos.x, enemy.pos.z) + 1.5);
   enemy.wp.copy(enemy.pos); enemy.wpT = 6; enemy.engageCD = 1;
 }
 const STEPS = [
@@ -1811,6 +1846,7 @@ const trainPanel = (() => {
   return { mesh, draw };
 })();
 function startTraining() {
+  if (MODE === 'planet') { msg('Trening jest w trybie kanionu', 2); return; }
   if (net.connected) { msg('Trening niedostępny w grze we dwoje', 2); return; }
   TR.on = true;
   enterStep(0);
@@ -1868,7 +1904,7 @@ function remoteFacing() {
 }
 // krater + powiadomienie drugiej osoby
 function netImpact(point, R, out = _n) {
-  impact(point, R, out);
+  W.impact(point, R, out);
   send({ t: 'crater', p: point.toArray(), R });
   return out;
 }
@@ -1906,7 +1942,7 @@ function updatePlayerKnock(dt) {
   PK.v.multiplyScalar(Math.pow(PK.slam ? 0.55 : 0.02, dt));
   if (PK.slam) PK.v.y -= 6 * dt;
   camera.getWorldPosition(_v1);
-  const g = heightAt(_v1.x, _v1.z);
+  const g = W.heightAt(_v1.x, _v1.z);
   if (_v1.y < g + 0.5) {
     rig.position.y += g + 0.5 - _v1.y;
     if (PK.slam && speed > 11) {
@@ -1930,10 +1966,10 @@ function onNet(m) {
       enemy.setRemote(true);
       P.hp = P.maxHp; P.sta = P.maxSta;
       if (net.role === 'guest') {
-        START.set(SPAWN_GUEST.x, heightAt(SPAWN_GUEST.x, SPAWN_GUEST.z), SPAWN_GUEST.z);
+        START.set(SPAWN_GUEST.x, W.heightAt(SPAWN_GUEST.x, SPAWN_GUEST.z), SPAWN_GUEST.z);
         resetRig();
         rig.rotation.set(0, Math.PI, 0);
-      } else { START.set(0, heightAt(0, 0), 0); resetRig(); }
+      } else { START.set(0, W.heightAt(0, 0), 0); resetRig(); }
       msg('Połączono! Walka 1 na 1', 3);
       sfx.ding();
       break;
@@ -1943,7 +1979,7 @@ function onNet(m) {
       if (RK.ball) { fadeBall(RK.ball); RK.ball = null; }
       for (const [, r] of remoteShots) { fadeBall(r.ball); if (r.beam) r.beam.dispose(); }
       remoteShots.clear();
-      START.set(0, heightAt(0, 0), 0);
+      START.set(0, W.heightAt(0, 0), 0);
       msg('Koniec gry we dwoje', 2);
       break;
     case 'pose':
@@ -1975,7 +2011,7 @@ function onNet(m) {
       sfx.explode(pos, m.s);
       break;
     }
-    case 'crater': impact(new THREE.Vector3().fromArray(m.p), m.R, _n); break;
+    case 'crater': W.impact(new THREE.Vector3().fromArray(m.p), m.R, _n); break;
     case 'hit': onNetHit(m); break;
     case 'blocked':
       sfx.block(enemy.chestW); meleeSpark(enemy.chestW, 0.4, 0xbfe8ff);
@@ -2065,6 +2101,36 @@ document.getElementById('room-join').addEventListener('click', () => {
 document.getElementById('room-leave').addEventListener('click', () => { leaveRoom(); roomStatus.textContent = 'Rozłączono.'; });
 
 // ---------------------------------------------------------------------------
+// Tryb planety: planeta obraca się pod graczem; obiekty w świecie (pociski, wybuchy)
+// przenosimy tym samym obrotem, żeby nic nie "skakało"
+// ---------------------------------------------------------------------------
+function recenterWorld() {
+  computeHead();
+  const q = W.recenter(F.head);
+  if (!q) return;
+  const C = W.CENTER;
+  const rot = (v) => v.sub(C).applyQuaternion(q).add(C);
+  rot(rig.position);
+  for (const p of projectiles) { rot(p.ball.group.position); p.vel.applyQuaternion(q); rot(p.origin); rot(p.prev); }
+  for (const B of beams) { rot(B.beam.tail); rot(B.beam.head); }
+  for (const e of explosions) rot(e.group.position);
+  for (const b of fading) rot(b.group.position);
+  for (const b of [K.kame, K.giant, side('left').ball, side('right').ball]) if (b) rot(b.group.position);
+  rot(boomLight.position);
+  computeHead();
+}
+document.querySelectorAll('.modebtn').forEach((el) => el.classList.toggle('on', el.dataset.m === MODE));
+if (MODE === 'planet') {
+  document.title = 'Mała Planeta VR';
+  const p = document.querySelector('#overlay > p');
+  if (p) p.textContent = 'Lecisz nad małą planetą z miasteczkami, ludźmi i statkami na orbicie. Aura przy ziemi kruszy grunt, fala robi wielkie kratery, a w pełni naładowana wielka kula rozsadza całą planetę.';
+  enemy.state = 'gone'; enemy.root.visible = false; enemy.timer = -1e9;
+  for (const t of targets) { t.alive = false; t.group.visible = false; }
+  for (const id of ['room-code', 'room-join', 'room-leave', 'room-status', 'aggr']) { const el = document.getElementById(id); if (el) (el.closest('.room-row') || el).style.display = 'none'; }
+  resetRig();
+}
+
+// ---------------------------------------------------------------------------
 // Pętla główna
 // ---------------------------------------------------------------------------
 const handsForAvatar = {
@@ -2097,8 +2163,8 @@ function cutsceneFrame(realDt) {
   trainPanel.mesh.visible = TR.on && !CS.active;
   if (CS.active && CS.who === 'player') {
     aura.level += (1 - aura.level) * (1 - Math.exp(-realDt * 2));
-    aura.update(realDt, t, CS.head, heightAt(CS.head.x, CS.head.z));
-  } else aura.update(realDt, t, CS.head, heightAt(CS.head.x, CS.head.z));
+    aura.update(realDt, t, CS.head, W.heightAt(CS.head.x, CS.head.z));
+  } else aura.update(realDt, t, CS.head, W.heightAt(CS.head.x, CS.head.z));
   enemy.pose(realDt, t, ctx);
   // postać gracza w pozie ładowania (pięści przy biodrach)
   _v3.crossVectors(CS.fwd, UP).normalize();
@@ -2111,7 +2177,7 @@ function cutsceneFrame(realDt) {
   }
   avatar.update({ dt: realDt, head: CS.head, headFwdFlat: CS.fwd, hands: handsForAvatar, flyDir: null, flySpeed: 0, kick: { left: null, right: null }, glow: aura.level, glowColor: GOLD, showHead: true });
   updateFx(realDt, t);
-  updateWorld(realDt);
+  W.updateWorld(realDt);
   flashMat.color.copy(P.flashColor);
   flashMat.opacity = P.flash;
   flashSphere.visible = P.flash > 0.01;
@@ -2145,6 +2211,7 @@ function frame() {
   updateKi(dt);
   updateCombat(dt);
   moveRig(dt);
+  if (MODE === 'planet') recenterWorld();
   if (xr) updateButtonsXR();
   updateLevelButton(realDt);
   updateTraining(realDt);
@@ -2165,7 +2232,12 @@ function frame() {
   if (P.sta <= 1 && !P.exhausted) { P.exhausted = true; msg('Zmęczony! Odpocznij albo naładuj aurę', 2); }
   if (P.exhausted && P.sta > 30) P.exhausted = false;
 
-  enemy.update(dt, t, ctx);
+  if (MODE !== 'planet') enemy.update(dt, t, ctx);
+  else {
+    W.auraTick(F.head, dt, aura.level, aura.powering);
+    const dtxt = W.destructionText();
+    if (dtxt) msg(dtxt, 0.3);
+  }
   updatePlayerKnock(dt);
   updateRemote(dt, t);
   if (net.connected) sendPose(realDt);
@@ -2173,16 +2245,16 @@ function frame() {
   if (K.giant) K.giant.update(dt, t);
   for (const st of inputs) if (st.ball) st.ball.update(dt, t);
   updateProjectiles(dt, t);
-  for (const tg of targets) tg.update(dt, t);
+  if (MODE !== 'planet') for (const tg of targets) tg.update(dt, t);
   updateShards(dt);
-  updateWorld(dt);
+  W.updateWorld(dt);
   updateFx(dt, t);
 
   // aura: poziom zależy od formy, ładowanie podbija do maksimum
   const goal = aura.powering ? 1 : CFG.formBase[P.form];
   aura.level += (goal - aura.level) * (1 - Math.exp(-dt * (goal > aura.level ? 0.8 : 0.3)));
   aura.form = P.form;
-  aura.update(dt, t, F.head, heightAt(F.head.x, F.head.z));
+  aura.update(dt, t, F.head, W.heightAt(F.head.x, F.head.z));
 
   // ciało gracza
   for (const s of ['left', 'right']) {
@@ -2245,4 +2317,4 @@ function frame() {
 renderer.setAnimationLoop(frame);
 
 // do testów w konsoli
-window.__sim = { net, onNet, RK, PK, remoteShots, TP, CS, TR, EV, STEPS, startTraining, BS, music, P, K, F, FLY, HAM, SK, enemy, inputs, stats, aura, avatar, rig, keys, desk, applyDesktopCamera, projectiles, eShots, heightAt, ctx, addKi, levelUp, boom, impact };
+window.__sim = { net, onNet, RK, PK, remoteShots, TP, CS, TR, EV, STEPS, startTraining, BS, music, P, K, F, FLY, HAM, SK, enemy, inputs, stats, aura, avatar, rig, keys, desk, applyDesktopCamera, projectiles, eShots, heightAt: W.heightAt, ctx, addKi, levelUp, boom, impact: W.impact, W, MODE };

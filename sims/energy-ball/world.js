@@ -453,3 +453,7 @@ export function setWorldMode(mode) {
   scene.fog = ar ? null : new THREE.FogExp2(FOG_COLOR, FOG_DENSITY);
 }
 scene.fog = new THREE.FogExp2(FOG_COLOR, FOG_DENSITY);
+
+// --- wspólny interfejs świata (ten sam co w planet.js) ---
+export const MAX_Y = 280;
+export function below(p, off = 0) { return p.y - off < heightAt(p.x, p.z); }

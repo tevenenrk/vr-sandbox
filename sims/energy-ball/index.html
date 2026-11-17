@@ -42,6 +42,8 @@
     }
     .seg { display: flex; gap: 6px; align-items: center; margin-top: 12px; flex-wrap: wrap; font-size: 14px; color: var(--muted); }
     .seg button { flex: 1 1 auto; font-size: 13px; padding: 8px 10px; background: rgba(255,255,255,.1); color: var(--text); }
+    .modebtn { flex: 1 1 auto; text-align: center; font-size: 13px; font-weight: 600; padding: 8px 10px; border-radius: 12px; background: rgba(255,255,255,.1); color: var(--text); text-decoration: none; }
+    .modebtn.on { background: linear-gradient(135deg, #5cc8ff, #b18cff); color: #08101c; }
     .seg button.on { background: linear-gradient(135deg, #ff8a5c, #ffcf7a); color: #1a0c04; }
     #room-code { flex: 1; min-width: 0; font: inherit; font-size: 15px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border); background: rgba(255,255,255,.08); color: var(--text); }
     .model-row { display: flex; gap: 8px; margin-top: 12px; }
@@ -66,6 +68,7 @@
   <a id="back" href="../../">← wszystkie symulatory</a>
   <div id="overlay">
     <h1>⚡ Kula Energii</h1>
+    <div class="seg" id="mode-seg"><span>Tryb:</span><a class="modebtn" data-m="canyon" href="./">Kanion</a><a class="modebtn" data-m="planet" href="./?mode=planet">Mała planeta</a></div>
     <p>Kanion na Meta Quest (WebXR). Najlepiej na kontrolerach — chwyt to dolny przycisk, spust to przycisk pod palcem wskazującym.</p>
     <ol>
       <li><b>Chwyt jednej ręki</b> → kula w dłoni, puść → strzał. <b>Chwyt obu, dłonie razem</b> → fala energii.</li>

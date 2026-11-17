@@ -6,6 +6,7 @@ Symulatory WebXR do testowania na Meta Quest 3 / 3S. Wszystko działa w przeglą
 
 | Symulator | Opis |
 |---|---|
+| [🪐 Mała Planeta](sims/energy-ball/?mode=planet) | Ta sama postać i sterowanie nad miniaturową planetą: miasteczka, ludzie, oceany, statki na orbicie. Aura przy ziemi kruszy grunt i podnosi głazy, fala robi wielkie kratery, w pełni naładowana wielka kula rozsadza całą planetę (po chwili powstaje nowa). |
 | [⚡ Kula Energii](sims/energy-ball/) | Pustynny kanion (ok. 700 m, ściany ~100 m): kule energii z dłoni, fala, wielka kula, aura i formy mocy, latanie, rywal do walki wręcz i na dystans, kratery i wgniecenia w ścianach. |
 
 ## Jak uruchomić na Quest
@@ -60,6 +61,17 @@ Zmiana poziomu (twoja albo rywala, który przechodzi na wyższą formę przy mni
 Ładowany cios świeci na pięści (albo stopie): biało → żółto (średni) → pulsujący pomarańczowy (mocny), z wibracją przy każdym progu. Naładowany mocny cios kogoś z wyższego poziomu przebija blok. Ciosy są animowane: kolejny wychodzi dopiero po skończeniu poprzedniego i gdy rywal wróci do zwarcia (jedno wciśnięcie zostaje zapamiętane). Słaby cios tylko go zachwieje, średni odrzuci na kilka metrów, mocny wyrzuci. Przy trafieniu gra na chwilę zamiera, a rywal reaguje zależnie od kierunku ciosu. Mocny cios wyrzuca go z walki — leci, wbija się w ściany i słupy albo robi krater.
 
 Na samych dłoniach (bez kontrolerów): pięść = chwyt, szczypnięcie = spust.
+
+## Tryb „Mała planeta”
+
+Planeta ma ok. 160 m promienia, ludzie są twojej wielkości. Można wznieść się ok. 70 m nad powierzchnię. Planeta obraca się pod tobą, gdy lecisz — zawsze jesteś „na górze”, więc całe sterowanie działa tak samo jak w kanionie.
+
+- **Aura przy ziemi** (ręce w dół + oba chwyty): pod tobą rośnie krater, wokół unoszą się głazy (spadają, gdy puścisz).
+- **Fala energii / kule**: kratery niszczą budynki i drzewa, ludzie w pobliżu uciekają, a trafieni wylatują w powietrze.
+- **Statki na orbicie**: kule same lekko naprowadzają się na statek w stożku ok. 20°; zestrzelony statek spada i robi krater.
+- **W pełni naładowana wielka kula** (ręce w górę, aż kula przestanie rosnąć): planeta pęka, wybucha i rozpada się na odłamki; po ok. 17 s powstaje nowa.
+
+Trening i gra we dwoje są dostępne w trybie kanionu.
 
 ## Gra we dwoje
 
